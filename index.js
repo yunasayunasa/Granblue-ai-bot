@@ -37,6 +37,30 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error(reason);
 });
 
+// ★ Gemini API 初期化コードを追加
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+  console.error("エラー: 環境変数 'GEMINI_API_KEY' 未設定");
+  process.exit(1);
+}
+let geminiModel;
+try {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    geminiModel = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash", // test_gemini.pyで成功したモデル
+      safetySettings: [ // ★ いたずら対策: 安全設定
+        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+      ]
+    });
+    console.log("Gemini APIクライアント初期化完了 (モデル: gemini-1.5-flash, 安全設定有効)");
+} catch (geminiInitError) {
+    console.error("Gemini APIクライアント初期化失敗:", geminiInitError);
+    process.exit(1);
+}
+
 // ボットの基本設定
 const client = new Client({
   intents: [
@@ -44,18 +68,24 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessageReactions
+    GatewayIntentBits.GuildMembers // ★★★ ギルドメンバーインテントを追加 ★★★
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction]
 });
 
 // データ保存用のファイルパス (グローバル変数の近くに追加)
-const DATA_FILE_PATH = path.join(__dirname, 'recruitment_data.json');
+const RENDER_DISK_MOUNT_PATH = process.env.DATA_PATH || '/data/botdata'; // Render永続ディスクパス等
+const DATA_FILE_PATH = path.join(RENDER_DISK_MOUNT_PATH, 'recruitment_data.json'); // ★ パスを確認・修正
 
 // グローバル変数
 let activeRecruitments = new Map(); // 現在進行中の募集を保持
 const tempUserData = new Map(); // 一時的なユーザーデータ保存用
 const attributes = ['火', '水', '土', '風', '光', '闇']; // グラブルの属性
 const raidTypes = ['天元', 'ルシゼロ', '参加者希望']; // レイドタイプ
+// ★ NGワードリストを追加
++ const NG_WORDS = ["死ね", "殺す", "馬鹿", "アホ", /* ... 他の不適切な単語を追加 ... */ ];
+// ★ 備考の最大文字数を追加
++ const MAX_REMARKS_LENGTH = 100;
 
 // 時間オプションを初期化
 const timeOptions = [];
