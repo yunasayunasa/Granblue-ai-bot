@@ -6,9 +6,17 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   StringSelectMenuBuilder,
+  + ModalBuilder, // ★ 追加
++ TextInputBuilder, // ★ 追加
++ TextInputStyle, // ★ 追加
   ButtonStyle,
   GatewayIntentBits,
++ InteractionType, // ★ 追加
++ PermissionsBitField // ★ 追加 (管理者チェック用)
 } = require('discord.js');
+
+// ★ Google Generative AIライブラリをインポート
++ const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generativeai");
 
 // 環境変数をロード
 require('dotenv').config();
