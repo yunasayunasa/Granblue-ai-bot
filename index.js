@@ -6,17 +6,17 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   StringSelectMenuBuilder,
-  + ModalBuilder, // ★ 追加
-+ TextInputBuilder, // ★ 追加
-+ TextInputStyle, // ★ 追加
+  ModalBuilder, // ★ 追加
+  TextInputBuilder, // ★ 追加
+  TextInputStyle, // ★ 追加
   ButtonStyle,
   GatewayIntentBits,
-+ InteractionType, // ★ 追加
-+ PermissionsBitField // ★ 追加 (管理者チェック用)
+  InteractionType, // ★ 追加
+  PermissionsBitField // ★ 追加 (管理者チェック用)
 } = require('discord.js');
 
 // ★ Google Generative AIライブラリをインポート
-+ const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generativeai");
+  const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generativeai");
 
 // 環境変数をロード
 require('dotenv').config();
@@ -67,8 +67,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions
-    GatewayIntentBits.GuildMembers // ★★★ ギルドメンバーインテントを追加 ★★★
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildMembers, // ★★★ ギルドメンバーインテントを追加 ★★★
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction]
 });
@@ -83,9 +83,9 @@ const tempUserData = new Map(); // 一時的なユーザーデータ保存用
 const attributes = ['火', '水', '土', '風', '光', '闇']; // グラブルの属性
 const raidTypes = ['天元', 'ルシゼロ', '参加者希望']; // レイドタイプ
 // ★ NGワードリストを追加
-+ const NG_WORDS = ["死ね", "殺す", "馬鹿", "アホ", /* ... 他の不適切な単語を追加 ... */ ];
+ const NG_WORDS = ["死ね", "殺す", "馬鹿", "アホ", /* ... 他の不適切な単語を追加 ... */ ];
 // ★ 備考の最大文字数を追加
-+ const MAX_REMARKS_LENGTH = 100;
+ const MAX_REMARKS_LENGTH = 100;
 
 // 時間オプションを初期化
 const timeOptions = [];
@@ -275,7 +275,7 @@ async function handleErrorReply(interaction, error) {
 }
 
 // メインのinteractionCreateイベントハンドラ
-client.on('interactionCreate', async interaction => {
+client.on('ate', async interaction => {
   try {
     // ボタンインタラクション
     if (interaction.isButton()) {
@@ -285,6 +285,23 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.isStringSelectMenu()) {
       await handleSelectMenuInteraction(interaction);
     }
+    
+   client.on('interactionCreate', async interaction => {
+     try {
+       if (!interaction.guild) return; // DM無視
+       if (interaction.isButton()) {
+         await handleButtonInteraction(interaction);
+       } else if (interaction.isStringSelectMenu()) {
+         await handleSelectMenuInteraction(interaction);
+       }
+     else if (interaction.type === InteractionType.ModalSubmit) { // ★ モーダル送信処理を追加
+       await handleModalSubmit(interaction); // ★ 新しい関数を呼び出す
+      }
+     } catch (error) {
+       console.error('インタラクション処理エラー:', error);
+       await handleErrorReply(interaction, error);
+     }
+   });
   } catch (error) {
     console.error('インタラクション処理エラー:', error);
     handleErrorReply(interaction, error);
@@ -640,6 +657,11 @@ async function handleButtonInteraction(interaction) {
       const recruitmentId = customId.replace('close_recruitment_', '');
       await closeRecruitment(interaction, recruitmentId);
     }
+     // ★ 備考入力モーダルを開くボタンの処理を追加
+       else if (customId.startsWith('open_remarks_modal_')) {
+           const recruitmentId = customId.replace('open_remarks_modal_', '');
+           await showRemarksModal(interaction, recruitmentId); // ★ 新しい関数を呼び出す
+       }
     // 参加確定ボタン
     else if (customId.startsWith('confirm_join_')) {
       const parts = customId.split('_');
@@ -726,6 +748,38 @@ else if (customId === 'cancel_test_participants') {
   } catch (error) {
     console.error(`ボタン処理エラー (${customId}):`, error);
     handleErrorReply(interaction, error);
+  }
+}
+
+// ★ 備考入力モーダル表示関数 (文字数制限付き)
+async function showRemarksModal(interaction, recruitmentId) {
+  const userData = tempUserData.get(interaction.user.id);
+  // ユーザーデータがない、またはIDが一致しない場合はエラー応答
+  if (!userData || userData.recruitmentId !== recruitmentId) {
+      return await interaction.reply({ content: 'エラー: 参加情報が見つからないか、情報が古くなっています。お手数ですが、再度「参加申込」ボタンから操作してください。', ephemeral: true });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`submit_remarks_${recruitmentId}`) // ★ モーダル送信時のID
+    .setTitle('参加に関する備考 (任意)');
+
+  const remarksInput = new TextInputBuilder()
+    .setCustomId('remarks_input') // ★ モーダル送信時にこのIDで値を取得
+    .setLabel(`希望/遅刻/早退など(${MAX_REMARKS_LENGTH}文字以内)`) // ★ ラベルに文字数表示
+    .setStyle(TextInputStyle.Paragraph) // 複数行入力可
+    .setPlaceholder('例: 22時まで参加希望です。初心者です。空欄でもOK。')
+    .setMaxLength(MAX_REMARKS_LENGTH) // ★ 文字数制限
+    .setRequired(false); // 任意入力
+
+  const firstActionRow = new ActionRowBuilder().addComponents(remarksInput);
+  modal.addComponents(firstActionRow);
+
+  try {
+      await interaction.showModal(modal);
+  } catch (error) {
+       console.error("モーダル表示エラー:", error);
+       // showModalが失敗した場合、ユーザーに応答する必要があるかもしれない
+       await interaction.followUp({ content: "備考入力画面の表示に失敗しました。", ephemeral: true }).catch(() => {});
   }
 }
 
@@ -1279,34 +1333,33 @@ async function showJoinConfirmation(interaction, recruitmentId, joinType, select
       { name: '参加可能時間', value: timeAvailability, inline: true }
     );
 
-  // 一時データに保存（確認ボタン用）
-  tempUserData.set(interaction.user.id, {
-    recruitmentId,
-    joinType,
-    attributes: selectedAttributes,
-    timeAvailability
-  });
+  // 一時データに保存
+  tempUserData.set(interaction.user.id, { recruitmentId, joinType, attributes: selectedAttributes, timeAvailability });
 
-  // 安全なカスタムID
-  const confirmBtnId = `confirm_${recruitmentId}`;
+   // 安全なカスタムID
+   const confirmBtnId = `confirm_${recruitmentId}`;
+   // ★ 備考モーダルを開くボタンIDに変更
+   const openRemarksModalBtnId = `open_remarks_modal_${recruitmentId}`;
 
-  const row = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(confirmBtnId)
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+         .setCustomId(confirmBtnId)
         .setLabel('参加確定')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId('cancel_join')
-        .setLabel('キャンセル')
-        .setStyle(ButtonStyle.Danger)
-    );
+         .setCustomId(openRemarksModalBtnId) // ★ 変更
+        .setLabel('備考入力して参加確定') // ★ 変更
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('cancel_join')
+          .setLabel('キャンセル')
+          .setStyle(ButtonStyle.Danger)
+      );
 
-  await interaction.update({
-    embeds: [embed],
-    components: [row]
-  });
-}
+    await interaction.update({
+      embeds: [embed],
+      components: [row]
+    });
+  }
 
 // 参加確認ボタン処理
 async function processConfirmation(interaction, recruitmentId) {
@@ -1867,193 +1920,6 @@ async function autoAssignAttributes(recruitment, previewOnly = false) {
 
   return recruitment;
 }
-
-  
-  
-  
-  
-  
-
-  
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-
-  
-  
-  
-
-  
-  
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
-  
-  
-  
-  
-  
-
-  
-
-  
-  
-  
-  
-
-  
-  
-
-  
-  
-  
-  
-
-  
-
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
-  
-  
-  
-
-  
-  
-  
-  
-
-  
-  
-  
-  
-  
-  
-
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
-
-  
-
-  
-  
-  
-  
-  
-  
-  
-
-  
-  
-  
-  
-
-  
-  
-  
-
-  
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
-
-  
-  
-
-  
-  
-
-  
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
-  
-  
-  
-
-  
-  
-
-  
-  
-  
-
-  
-  
-  
-  
-  
-
-  
-  
-
-
-
 
 // 自動締め切りチェック処理も修正して明確にする
 function checkAutomaticClosing() {
@@ -2723,6 +2589,33 @@ async function confirmAddTestParticipants(interaction, recruitmentId, count) {
     });
   }
 }
+
+// ★ Gemini API で備考を短く要約する関数 (プロンプト修正、安全性チェック強化)
+async function summarizeRemark(remarkText) {
+  if (!remarkText || remarkText.trim() === "") return null;
+  if (!geminiModel) { console.error("Geminiモデル未初期化"); return "(要約不可:設定)"; }
+
+  const prompt = `以下のDiscordのグラブル高難易度募集への参加者の備考を、最も重要な情報を15文字程度で簡潔に要約してください。特に時間に関する情報（「〇時まで」「〇時から参加」「遅れます」等）や、配慮に関する情報（「初心者です」「他の人優先で」等）を優先して含めてください。\n\n備考: ${remarkText}\n\n要約:`;
+
+   try {
+      debugLog('Gemini', `備考要約リクエスト: "${remarkText.substring(0, 50)}..."`);
+      const result = await geminiModel.generateContent(prompt);
+      const response = result.response;
+   
+      // ★ 安全性ブロックチェック強化
+      if (response.promptFeedback?.blockReason) {
+          console.warn(`Gemini Safety Blocked (Prompt): Reason=${response.promptFeedback.blockReason}, Remarks="${remarkText.substring(0,50)}..."`);
+          return `(入力不適切)`;
+      }
+    } catch (error) { // ★ catch ブロックがあるか？
+      console.error("Gemini API 備考要約エラー:", error);
+      return `(要約エラー)`; // ★ catch ブロックの中身
+      // ★ この catch ブロックに対応する閉じ括弧があるか？ ↓
+  }
+  // ★ 関数自体の閉じ括弧があるか？ ↓
+}
+  
+
 // サーバーを起動
 app.listen(PORT, () => {
   console.log(`監視用サーバーが起動しました: ポート ${PORT}`);
