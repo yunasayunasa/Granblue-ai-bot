@@ -16,7 +16,8 @@ const {
 } = require('discord.js');
 
 // ★ Google Generative AIライブラリをインポート
-  const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generativeai");
+ 
+//const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generativeai");
 
 // 環境変数をロード
 require('dotenv').config();
@@ -37,29 +38,7 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error(reason);
 });
 
-// ★ Gemini API 初期化コードを追加
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-  console.error("エラー: 環境変数 'GEMINI_API_KEY' 未設定");
-  process.exit(1);
-}
-let geminiModel;
-try {
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    geminiModel = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash", // test_gemini.pyで成功したモデル
-      safetySettings: [ // ★ いたずら対策: 安全設定
-        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-      ]
-    });
-    console.log("Gemini APIクライアント初期化完了 (モデル: gemini-1.5-flash, 安全設定有効)");
-} catch (geminiInitError) {
-    console.error("Gemini APIクライアント初期化失敗:", geminiInitError);
-    process.exit(1);
-}
+
 
 // ボットの基本設定
 const client = new Client({
@@ -2590,30 +2569,7 @@ async function confirmAddTestParticipants(interaction, recruitmentId, count) {
   }
 }
 
-// ★ Gemini API で備考を短く要約する関数 (プロンプト修正、安全性チェック強化)
-async function summarizeRemark(remarkText) {
-  if (!remarkText || remarkText.trim() === "") return null;
-  if (!geminiModel) { console.error("Geminiモデル未初期化"); return "(要約不可:設定)"; }
 
-  const prompt = `以下のDiscordのグラブル高難易度募集への参加者の備考を、最も重要な情報を15文字程度で簡潔に要約してください。特に時間に関する情報（「〇時まで」「〇時から参加」「遅れます」等）や、配慮に関する情報（「初心者です」「他の人優先で」等）を優先して含めてください。\n\n備考: ${remarkText}\n\n要約:`;
-
-   try {
-      debugLog('Gemini', `備考要約リクエスト: "${remarkText.substring(0, 50)}..."`);
-      const result = await geminiModel.generateContent(prompt);
-      const response = result.response;
-   
-      // ★ 安全性ブロックチェック強化
-      if (response.promptFeedback?.blockReason) {
-          console.warn(`Gemini Safety Blocked (Prompt): Reason=${response.promptFeedback.blockReason}, Remarks="${remarkText.substring(0,50)}..."`);
-          return `(入力不適切)`;
-      }
-    } catch (error) { // ★ catch ブロックがあるか？
-      console.error("Gemini API 備考要約エラー:", error);
-      return `(要約エラー)`; // ★ catch ブロックの中身
-      // ★ この catch ブロックに対応する閉じ括弧があるか？ ↓
-  }
-  // ★ 関数自体の閉じ括弧があるか？ ↓
-}
   
 
 // サーバーを起動
