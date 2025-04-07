@@ -1000,8 +1000,16 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   // 募集締め切り処理
   async function closeRecruitment(interaction, recruitmentId) {
     debugLog('CloseRecruitment', `募集締め切り処理: ${recruitmentId}, User: ${interaction.user.tag}`);
+    // ★★★ デバッグログ追加 ★★★
+  const currentKeys = Array.from(activeRecruitments.keys());
+  debugLog('CloseRecruitment', `現在のMapキー (${currentKeys.length}件):`, currentKeys.join(', '));
+  // ★★★ ここまで ★★★
+
     const recruitment = activeRecruitments.get(recruitmentId);
-    if (!recruitment) return interaction.reply({ content: '締め切り対象の募集が見つかりません。', ephemeral: true });
+    if (!recruitment) {
+      debugLog('CloseRecruitment', `エラー: ID ${recruitmentId} がMapに見つかりません。`); // なぜ見つからないかのログ
+      return await interaction.reply({ content: `締め切り対象の募集(ID: ${recruitmentId})が見つかりません。IDが正しいか、募集が削除されていないか確認してください。`, ephemeral: true });
+    }
     const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
     if (interaction.user.id !== recruitment.creator && !isAdmin) return interaction.reply({ content: '募集者または管理者のみ締め切れます。', ephemeral: true });
     if (recruitment.status === 'closed' || recruitment.status === 'assigned') return interaction.reply({ content: 'この募集は既に締め切られています。', ephemeral: true });
