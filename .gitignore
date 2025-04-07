@@ -1,0 +1,21 @@
+# Node.js dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Log files (もし出力するなら)
+*.log
+logs/
+
+# Data files (Git管理しない)
+recruitment_data.json
+recruitment_data.json.bak
+last_prompt.txt # デバッグ用ファイルなど
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE config files (例: VS Code)
+.vscode/

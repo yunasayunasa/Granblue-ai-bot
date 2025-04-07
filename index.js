@@ -46,10 +46,20 @@ const {
     partials: [Partials.Channel, Partials.Message, Partials.Reaction]
   });
   
-  // データ保存用のファイルパス
-  const RENDER_DISK_MOUNT_PATH = process.env.DATA_PATH || '/data/botdata'; // Render永続ディスクパス等
-  const DATA_FILE_PATH = path.join(RENDER_DISK_MOUNT_PATH, 'recruitment_data.json');
-  
+  // 本番環境のパス（Renderなど）
+const PRODUCTION_DATA_PATH = process.env.DATA_PATH || '/data/botdata';
+// ローカルテスト用のパス (プロジェクト内に data フォルダを作成)
+const LOCAL_DATA_PATH = path.join(__dirname, 'data');
+
+// NODE_ENV 環境変数で本番かローカルかを判定 (なければローカルとみなす)
+const isProduction = process.env.NODE_ENV === 'production';
+
+const RENDER_DISK_MOUNT_PATH = isProduction ? PRODUCTION_DATA_PATH : LOCAL_DATA_PATH;
+const DATA_FILE_PATH = path.join(RENDER_DISK_MOUNT_PATH, 'recruitment_data.json');
+
+console.log(`[Config] Environment: ${isProduction ? 'Production' : 'Development'}`);
+console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
+
   // グローバル変数
   let activeRecruitments = new Map(); // 現在進行中の募集を保持
   const tempUserData = new Map(); // 一時的なユーザーデータ保存用 (モーダル連携用)
@@ -521,7 +531,7 @@ const {
       .setCustomId('remarks_input')
       .setLabel(`希望/遅刻/早退など (${MAX_REMARKS_LENGTH}文字以内)`)
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('例: 22時まで参加希望です。初心者です。空欄でもOK。')
+      .setPlaceholder('例: 22時まで。初心者です。空欄でもOK。20文字まで表示')
       .setMaxLength(MAX_REMARKS_LENGTH)
       .setValue(userData.remarks || '')
       .setRequired(false);
@@ -547,32 +557,42 @@ const {
     // console.log(`モーダル送信処理開始: ${customId}, User: ${interaction.user.tag}`);
   
     try {
+      // ★★★ 最初に deferReply で応答を保留 ★★★
+    await interaction.deferReply({ ephemeral: true }); // ephemeral: true で本人にのみ「考え中」表示
+
       if (!customId.startsWith('submit_remarks_')) {
           console.warn(`不明なモーダルID: ${customId}`);
-          return await interaction.reply({ content: '不明なフォームデータを受信しました。', ephemeral: true });
+         // deferReplyした後なので editReply でエラーメッセージを返す
+        return await interaction.editReply({ content: '不明なフォームデータを受信しました。', ephemeral: true });
       }
   
       const recruitmentId = customId.replace('submit_remarks_', '');
       const recruitment = activeRecruitments.get(recruitmentId);
   
       if (!recruitment || recruitment.status !== 'active') {
-        return await interaction.reply({ content: 'この募集は既に終了しているか、存在しません。', ephemeral: true });
-      }
+        // editReply でエラーメッセージを返す
+      return await interaction.editReply({ content: 'この募集は既に終了しているか、存在しません。', ephemeral: true });
+    }
   
       const userData = tempUserData.get(interaction.user.id);
       if (!userData || userData.recruitmentId !== recruitmentId) {
-        return await interaction.reply({ content: 'エラー: 参加情報が見つからないか古くなっています。再度「参加申込」ボタンから操作してください。', ephemeral: true });
-      }
+        // editReply でエラーメッセージを返す
+      return await interaction.editReply({ content: 'エラー: 参加情報が見つからないか古くなっています。再度「参加申込」ボタンから操作してください。', ephemeral: true });
+    }
+
   
       const remarks = interaction.fields.getTextInputValue('remarks_input')?.trim() || '';
   
       const foundNgWord = NG_WORDS.find(ngWord => remarks.toLowerCase().includes(ngWord.toLowerCase()));
       if (foundNgWord) {
-        return await interaction.reply({ content: `エラー: 備考に不適切な単語「${foundNgWord}」が含まれています。修正してください。`, ephemeral: true });
-      }
-      if (remarks.length > MAX_REMARKS_LENGTH) {
-           return await interaction.reply({ content: `エラー: 備考が長すぎます (${remarks.length}/${MAX_REMARKS_LENGTH}文字)。`, ephemeral: true });
-      }
+        // editReply でエラーメッセージを返す
+      return await interaction.editReply({ content: `エラー: 備考に不適切な単語「${foundNgWord}」が含まれています。修正してください。`, ephemeral: true });
+    }
+    if (remarks.length > MAX_REMARKS_LENGTH) {
+         // editReply でエラーメッセージを返す
+         return await interaction.editReply({ content: `エラー: 備考が長すぎます (${remarks.length}/${MAX_REMARKS_LENGTH}文字)。`, ephemeral: true });
+    }
+
   
       // 参加確定処理を呼び出し
       await confirmParticipation( interaction, recruitmentId, userData.joinType, userData.attributes, userData.timeAvailability, remarks );
@@ -582,18 +602,17 @@ const {
   
     } catch (error) {
       console.error(`モーダル送信処理エラー (ID: ${customId}, User: ${interaction.user.tag}):`, error);
-      const replyOptions = { content: '備考の処理中にエラーが発生しました。', ephemeral: true };
-      // モーダル送信後のエラーはfollowUpで応答
-      if (interaction.replied || interaction.deferred) {
-          await interaction.followUp(replyOptions).catch(e => console.error("Modal Error FollowUp Failed:", e.message));
-      } else {
-          console.warn("モーダル送信インタラクションが reply/deferred されていませんでした。");
-          await interaction.reply(replyOptions).catch(e => console.error("Modal Error Reply Failed:", e.message));
-      }
-    } /* finally {
-        console.log(`モーダル送信処理終了: ${customId}, User: ${interaction.user.tag}`);
-    } */ // 抑制
+      // deferReply 後なので editReply でエラー応答
+    try {
+      await interaction.editReply({ content: '備考の処理中にエラーが発生しました。', ephemeral: true });
+  } catch (e) {
+      console.error("Modal Error editReply Failed:", e.message);
+      // editReply も失敗した場合、チャンネルに通知するなど
+      try { await interaction.channel.send({content:`<@${interaction.user.id}> モーダル処理でエラーが発生しましたが、応答できませんでした。`}).catch(()=>{}); } catch{}
   }
+}
+}
+
   
   
   // セレクトメニュー処理関数
@@ -891,14 +910,17 @@ const {
     debugLog('ConfirmParticipation', `参加確定処理: ${recruitmentId}, User: ${interaction.user.tag}`);
   
     const recruitment = activeRecruitments.get(recruitmentId);
+    // ... (募集存在チェック - エラー応答は editReply か followUp に統一する必要があるかも) ...
     if (!recruitment || recruitment.status !== 'active') {
       const replyOptions = { content: 'この募集は既に終了しているか、存在しません。', embeds: [], components: [], ephemeral: true };
       try {
-          if (interaction.replied || interaction.deferred) await interaction.followUp(replyOptions);
-          else await interaction.reply(replyOptions);
+          // defer 済みのはずなので editReply を試みる
+          if (interaction.deferred || interaction.replied) await interaction.editReply(replyOptions);
+          else await interaction.reply(replyOptions); // 通常ここには来ないはず
       } catch (e) { console.error("参加確定前チェックエラー応答失敗:", e.message); }
       return;
-    }
+  }
+
   
     const participantData = { userId: interaction.user.id, username: interaction.user.username, joinType: joinType, attributes: selectedAttributes, timeAvailability: timeAvailability, remarks: remarks || '', assignedAttribute: null, isTestParticipant: false };
     const existingIndex = recruitment.participants.findIndex(p => p.userId === interaction.user.id);
@@ -917,17 +939,25 @@ const {
     try { await updateRecruitmentMessage(recruitment); }
     catch (updateError) { console.error("参加確定後のメッセージ更新エラー:", updateError); }
   
-    const replyOptions = {
-      content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
-      embeds: [], components: [], ephemeral: true
-    };
-    try {
-      if (interaction.type === InteractionType.ModalSubmit || interaction.replied || interaction.deferred) await interaction.followUp(replyOptions);
-      else await interaction.update(replyOptions);
-    } catch (error) {
-      console.error("参加完了メッセージ送信エラー:", error);
-      try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージ表示に失敗しました。` }).catch(() => {}); } catch {}
-    }
+    // ★★★ 完了メッセージ応答部分を修正 ★★★
+  const replyOptions = {
+    content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
+    embeds: [], components: [], ephemeral: true
+  };
+  try {
+      // deferReply されているはずなので editReply を使う
+      if (interaction.deferred || interaction.replied) { // deferred か replied 状態のはず
+          await interaction.editReply(replyOptions);
+      } else {
+          // deferされていない状況は異常だが、念のためreplyを試みる
+          console.warn("[ConfirmParticipation] Interaction was not deferred/replied before sending completion message.");
+          await interaction.reply(replyOptions);
+      }
+  } catch (error) {
+    console.error("参加完了メッセージ送信(editReply/reply)エラー:", error);
+    try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
+  }
+
   
     // ★★★ 参加者が7人になった時点でプレビュー ★★★
     if (recruitment.participants.length === 7 && recruitment.status === 'active') {
@@ -993,32 +1023,43 @@ const {
     try { await updateRecruitmentMessage(recruitment); }
     catch (updateError) { console.error("締め切り後のメッセージ更新エラー:", updateError); }
     await interaction.reply({ content: '募集を締め切り、参加者の割り振りを行いました。', ephemeral: true });
-    // 割り振り結果通知
-    try {
-        const channel = await client.channels.fetch(recruitment.channel);
-        if (channel && channel.isTextBased()) {
-            let assignedText = `**【${recruitment.finalRaidType || recruitment.type} 募集締切】**\n` +
-                               `ID: ${recruitment.id}\n` +
-                               `開催予定: ${recruitment.finalTime || recruitment.time}\n` +
-                               `参加者 (${recruitment.participants.length}名) の割り振りが完了しました。\n`;
-             // 割り当てられた人と、割り当てられなかった人を表示
-             const assignedParticipants = recruitment.participants.filter(p => p.assignedAttribute);
-             const unassignedParticipants = recruitment.participants.filter(p => !p.assignedAttribute);
-  
-             attributes.forEach(attr => {
-                const p = assignedParticipants.find(pt => pt.assignedAttribute === attr);
-                assignedText += `【${attr}】: ${p ? `<@${p.userId}>` : '空き'}\n`;
-             });
-              if (unassignedParticipants.length > 0) {
-                  assignedText += `\n**※以下の参加者は今回割り当てられませんでした:**\n`;
-                  assignedText += unassignedParticipants.map(p => `- <@${p.userId}>`).join('\n');
-              }
-             // 割り当てられた参加者のみメンション
-             await channel.send({ content: assignedText, allowedMentions: { users: assignedParticipants.map(p => p.userId) } });
-        }
-    } catch (notifyError) { console.error("割り振り結果通知エラー:", notifyError); }
-    saveRecruitmentData();
-  }
+    // 割り振り結果をチャンネルに通知
+  try {
+    const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
+    if (channel && channel.isTextBased()) {
+        let assignedText = `**【${recruitment.finalRaidType || recruitment.type} 募集締切】**\n` +
+                           `ID: ${recruitment.id}\n` +
+                           `開催予定: ${recruitment.finalTime || recruitment.time}\n` +
+                           `参加者 (${recruitment.participants.length}名) の割り振りが完了しました。\n`;
+
+         const assignedParticipants = recruitment.participants.filter(p => p?.assignedAttribute); // 安全アクセス
+         const unassignedParticipants = recruitment.participants.filter(p => !p?.assignedAttribute); // 安全アクセス
+
+         attributes.forEach(attr => {
+            const p = assignedParticipants.find(pt => pt?.assignedAttribute === attr); // 安全アクセス
+            let participantText = '空き';
+            if (p) {
+                participantText = `<@${p.userId}>`;
+                // ★★★ 備考があれば表示を追加 ★★★
+                if (p.remarks) {
+                    // ここでは備考内容も短く表示してみる
+                    participantText += ` (📝 ${p.remarks.substring(0, 20)}${p.remarks.length > 20 ? '...' : ''})`;
+                }
+            }
+            assignedText += `【${attr}】: ${participantText}\n`;
+         });
+
+          if (unassignedParticipants.length > 0) {
+              assignedText += `\n**※以下の参加者は今回割り当てられませんでした:**\n`;
+              assignedText += unassignedParticipants.map(p => `- <@${p.userId}>`).join('\n');
+          }
+         // 割り当てられた参加者のみメンション
+         await channel.send({ content: assignedText, allowedMentions: { users: assignedParticipants.map(p => p.userId) } });
+    }
+} catch (notifyError) { console.error("割り振り結果通知エラー:", notifyError); }
+
+saveRecruitmentData(); // データ保存
+}
   
   // 募集メッセージ更新処理 (上限撤廃対応)
   async function updateRecruitmentMessage(recruitment) {

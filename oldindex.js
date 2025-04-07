@@ -1984,20 +1984,21 @@ async function updateRecruitmentMessage(recruitment) {
 
       if (recruitment.status === 'closed' || recruitment.status === 'assigned') {
         // 締め切り/割り当て済みの場合: 割り当てられた参加者を表示
-        assignedParticipant = recruitment.participants.find(p => p.assignedAttribute === attr);
+        assignedParticipant = recruitment.participants.find(p => p?.assignedAttribute === attr); // ?. で安全アクセス
         if (assignedParticipant) {
           value = `<@${assignedParticipant.userId}>`;
+           // ★★★ 備考があればアイコンを追加 ★★★
            if (assignedParticipant.remarks) {
-               value += ` 📝`; // 備考ありアイコン
+               // ツールチップや省略表示はEmbedフィールドでは難しいので、アイコンで示す
+               value += ` 📝`; // 例: メモの絵文字
            }
         } else {
            value = '空き';
         }
       } else if (recruitment.status === 'active') {
-        // 募集中の場合: その属性を希望している参加者リスト (短縮表示)
-        const hopefuls = recruitment.participants.filter(p => p.attributes.includes(attr));
+        // 募集中の場合: 希望者リスト (備考は表示しない方が見やすいかも)
+        const hopefuls = recruitment.participants.filter(p => p?.attributes?.includes(attr)); // 安全アクセス
         if (hopefuls.length > 0) {
-           // 2名まで名前表示、それ以上は人数
            if (hopefuls.length <= 2) {
                value = hopefuls.map(p => `<@${p.userId}>`).join('\n');
            } else {
@@ -2011,7 +2012,8 @@ async function updateRecruitmentMessage(recruitment) {
       fields.push({ name: `【${attr}】`, value: value, inline: true });
     });
 
-    embed.addFields(fields);
+    embed.addFields(fields); // 更新されたフィールドをセット
+
 
 
     // ボタン行を作成（募集中の場合のみ有効）
