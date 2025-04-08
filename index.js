@@ -1313,14 +1313,27 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
                       assignedText = assignedText.substring(0, 1950) + '... (メッセージ省略)';
                   }
 
-                  await channel.send({ content: assignedText, allowedMentions: { users: assignedP.map(p => p.userId) } });
-                  debugLog('AutoCloseCheck', `自動締め切り通知完了 - ID: ${id}`); // 成功ログ変更
+                  // ★★★ メンション許可リストからテストユーザーIDを除外 ★★★
+    const realUserIdsToMention = assignedP
+    .map(p => p.userId) // まずユーザーIDの配列を取得
+    .filter(userId => /^\d+$/.test(userId)); // 数字のみで構成されるID（Snowflake形式）だけをフィルタリング
+    // または .filter(userId => !userId.startsWith('test-')) のような簡易的なチェックでも可
 
-              } catch (sendError) { // ★★★ send() のエラーをキャッチ ★★★
-                  console.error(`[AutoCloseCheck] ID ${id} の通知メッセージ送信エラー:`);
-                  console.error(sendError); // エラーオブジェクト全体を出力
-              }
-               // ★★★ ここまでが通知送信の try...catch ★★★
+console.log(`[AutoCloseCheck] メンション対象の実ユーザーID: ${realUserIdsToMention.join(', ') || 'なし'}`); // デバッグ用ログ
+
+await channel.send({
+    content: assignedText,
+    allowedMentions: {
+        // ★ フィルタリングされた実ユーザーIDの配列を使用 ★
+        users: realUserIdsToMention
+    }
+});
+debugLog('AutoCloseCheck', `自動締め切り通知完了 - ID: ${id}`);
+
+} catch (sendError) { // ★ send() のエラーをキャッチ
+console.error(`[AutoCloseCheck] ID ${id} の通知メッセージ送信エラー:`);
+console.error(sendError); // エラーオブジェクト全体を出力
+}
 
           } else {
               console.warn(`[AutoCloseCheck] ID ${id} の通知チャンネルが見つからないか、テキストチャンネルではありません。 (Channel ID: ${recruitment.channel})`);
