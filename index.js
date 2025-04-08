@@ -1264,47 +1264,82 @@ saveRecruitmentData(); // データ保存
   
     // debugLog('AutoCloseCheck', `チェック開始 - アクティブ募集数: ${activeRecruitmentEntries.length}`); // ログ抑制
   
-    activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
-      try {
-          // recruitment が null でないことを再確認
-          if (!recruitment || !recruitment.date) {
-              console.warn(`[AutoCloseCheck] ID ${id} のデータが無効です。スキップします。`);
-              return;
-          }
-          const raidDateStr = recruitment.date;
-          const [year, month, day] = raidDateStr.split('-').map(Number);
-          const closingTime = new Date(Date.UTC(year, month - 1, day, 8, 0, 0) - (9 * 60 * 60 * 1000)); // JST 8:00
-  
-          if (now >= closingTime) {
-            debugLog('AutoCloseCheck', `募集ID: ${id} - 自動締切時刻 (${closingTime.toISOString()} JST) 超過`);
-            recruitment.status = 'closed';
-            debugLog('AutoCloseCheck', `ステータスを 'closed' に変更`);
-            await autoAssignAttributes(recruitment, false);
-            await updateRecruitmentMessage(recruitment);
-            // 終了通知
-            const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
-            if (channel && channel.isTextBased()) {
-               let assignedText = `**【${recruitment.finalRaidType || recruitment.type} 自動締切】**\n` +
-                                  `ID: ${recruitment.id} (募集者: <@${recruitment.creator}>)\n` +
-                                  `募集が自動的に締め切られ、参加者(${recruitment.participants.length}名)が割り振られました。\n` +
-                                  `開催予定: ${recruitment.finalTime || recruitment.time}\n`;
-                const assignedP = recruitment.participants.filter(p => p.assignedAttribute);
-                const unassignedP = recruitment.participants.filter(p => !p.assignedAttribute);
-                attributes.forEach(attr => { const p = assignedP.find(pt => pt.assignedAttribute === attr); assignedText += `【${attr}】: ${p ? `<@${p.userId}>` : '空き'}\n`; });
-                if (unassignedP.length > 0) assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n${unassignedP.map(p => `- <@${p.userId}>`).join('\n')}`;
-                await channel.send({ content: assignedText, allowedMentions: { users: assignedP.map(p => p.userId) } });
-                debugLog('AutoCloseCheck', `自動締め切り完了 - ID: ${id}`);
-            } else { console.warn(`[AutoCloseCheck] ID ${id} の通知チャンネルが見つかりません。`); }
-            saveRecruitmentData();
-          }
-          // else { // 締切時刻前のログは抑制
-          //   const minutes = now.getMinutes(); if (minutes % 30 === 0) { /* 30分ごと */ }
-          // }
-      } catch (error) {
-          console.error(`[AutoCloseCheck] 募集ID ${id} 処理エラー:`, error);
-          if (recruitment) { recruitment.status = 'error'; activeRecruitments.set(id, recruitment); saveRecruitmentData(); }
+    // checkAutomaticClosing 関数内の forEach ループの中
+activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
+  try { // ← 外側の try ブロック開始
+      // recruitment が null でないことを再確認
+      if (!recruitment || !recruitment.date) {
+          console.warn(`[AutoCloseCheck] ID ${id} のデータが無効です。スキップします。`);
+          return;
       }
-    });
+      const raidDateStr = recruitment.date;
+      const [year, month, day] = raidDateStr.split('-').map(Number);
+      // 日本時間の午前8時 (UTCの前日23時) を計算
+      const closingTimeJST = new Date(Date.UTC(year, month - 1, day, 8, 0, 0) - (9 * 60 * 60 * 1000));
+
+      if (now >= closingTimeJST) {
+          debugLog('AutoCloseCheck', `募集ID: ${id} - 自動締切時刻 (${closingTimeJST.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} JST) 超過`);
+
+          // 既に処理済みでないか確認 (念のため)
+          if (recruitment.status === 'closed' || recruitment.status === 'assigned') {
+               // console.log(`[AutoCloseCheck] ID ${id} は既に処理済み (${recruitment.status})。スキップします。`);
+               return;
+          }
+
+          recruitment.status = 'closed'; // 先に closed にマーク
+          debugLog('AutoCloseCheck', `ステータスを 'closed' に変更`);
+
+          await autoAssignAttributes(recruitment, false); // 割り振り実行 (ここで assigned になる)
+          await updateRecruitmentMessage(recruitment); // 募集メッセージ更新
+
+          // --- 通知送信部分 ---
+          const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
+          if (channel && channel.isTextBased()) {
+              let assignedText = `**【${recruitment.finalRaidType || recruitment.type} 自動締切】**\n` +
+                                 `ID: ${recruitment.id} (募集者: <@${recruitment.creator}>)\n` +
+                                 `募集が自動的に締め切られ、参加者(${recruitment.participants.length}名)が割り振られました。\n` +
+                                 `開催予定: ${recruitment.finalTime || recruitment.time}\n`;
+              const assignedP = recruitment.participants.filter(p => p?.assignedAttribute); // 安全アクセス
+              const unassignedP = recruitment.participants.filter(p => !p?.assignedAttribute); // 安全アクセス
+              attributes.forEach(attr => { const p = assignedP.find(pt => pt.assignedAttribute === attr); assignedText += `【${attr}】: ${p ? `<@${p.userId}>` : '空き'}\n`; });
+              if (unassignedP.length > 0) assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n${unassignedP.map(p => `- <@${p.userId}>`).join('\n')}`;
+
+              // ★★★ ここからが通知送信の try...catch ★★★
+              try {
+                  console.log(`[AutoCloseCheck] 通知送信試行 (Channel: ${channel.id}, Length: ${assignedText.length})`);
+
+                  if (assignedText.length > 2000) {
+                      console.warn(`[AutoCloseCheck] 通知メッセージが長すぎるため(${assignedText.length}文字)、短縮します。`);
+                      assignedText = assignedText.substring(0, 1950) + '... (メッセージ省略)';
+                  }
+
+                  await channel.send({ content: assignedText, allowedMentions: { users: assignedP.map(p => p.userId) } });
+                  debugLog('AutoCloseCheck', `自動締め切り通知完了 - ID: ${id}`); // 成功ログ変更
+
+              } catch (sendError) { // ★★★ send() のエラーをキャッチ ★★★
+                  console.error(`[AutoCloseCheck] ID ${id} の通知メッセージ送信エラー:`);
+                  console.error(sendError); // エラーオブジェクト全体を出力
+              }
+               // ★★★ ここまでが通知送信の try...catch ★★★
+
+          } else {
+              console.warn(`[AutoCloseCheck] ID ${id} の通知チャンネルが見つからないか、テキストチャンネルではありません。 (Channel ID: ${recruitment.channel})`);
+          }
+          saveRecruitmentData(); // 締め切り処理が完了したら保存
+      }
+  } catch (error) { // ← 外側の try ブロックに対応する catch
+      console.error(`[AutoCloseCheck] 募集ID ${id} 処理中に予期せぬエラー:`, error);
+      if (recruitment) {
+          try {
+              recruitment.status = 'error'; // エラー状態にする
+              activeRecruitments.set(id, recruitment);
+              saveRecruitmentData(); // エラー状態を保存
+          } catch (e) {
+              console.error("Error status setting/saving failed:", e);
+          }
+      }
+  }
+}); // ← forEach の終わり
   }
   
   // 募集リスト表示機能 (上限撤廃対応)
