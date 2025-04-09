@@ -1301,7 +1301,23 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
                                  `開催予定: ${recruitment.finalTime || recruitment.time}\n`;
               const assignedP = recruitment.participants.filter(p => p?.assignedAttribute); // 安全アクセス
               const unassignedP = recruitment.participants.filter(p => !p?.assignedAttribute); // 安全アクセス
-              attributes.forEach(attr => { const p = assignedP.find(pt => pt.assignedAttribute === attr); assignedText += `【${attr}】: ${p ? `<@${p.userId}>` : '空き'}\n`; });
+               // ★★★ ここから修正 ★★★
+               attributes.forEach(attr => {
+                const p = assignedP.find(pt => pt?.assignedAttribute === attr); // 割り当てられた参加者を探す (安全アクセス)
+                let participantText = '空き'; // デフォルトは「空き」
+                if (p) {
+                    participantText = `<@${p.userId}>`; // 参加者IDでメンション
+                    // 備考があれば表示を追加
+                    if (p.remarks && p.remarks.trim() !== '') { // remarks が存在し、空文字列でない場合
+                        // 表示形式はお好みで調整してください (短縮表示の例)
+                        participantText += ` (📝 ${p.remarks.substring(0, 20)}${p.remarks.length > 20 ? '...' : ''})`;
+                        // 全文表示の場合 (文字数上限に注意)
+                        // participantText += ` (備考: ${p.remarks})`;
+                    }
+                }
+                assignedText += `【${attr}】: ${participantText}\n`; // 組み立てたテキストを追加
+             });
+             // ★★★ ここまで修正 ★★★
               if (unassignedP.length > 0) assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n${unassignedP.map(p => `- <@${p.userId}>`).join('\n')}`;
 
               // ★★★ ここからが通知送信の try...catch ★★★
