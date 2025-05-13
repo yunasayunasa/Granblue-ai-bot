@@ -608,7 +608,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   } catch (e) {
       console.error("Modal Error editReply Failed:", e.message);
       // editReply も失敗した場合、チャンネルに通知するなど
-      try { await interaction.channel.send({content:`<@${interaction.user.id}> モーダル処理でエラーが発生しましたが、応答できませんでした。`}).catch(()=>{}); } catch{}
+      try { await interaction.channel.send({content:`<@${interaction.user.id}> サーバー側再起動中のエラーです。時間を空けて再度登録するか、備考なしで登録後、手動でコメントをお願いします。`}).catch(()=>{}); } catch{}
   }
 }
 }
