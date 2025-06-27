@@ -905,76 +905,107 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   }
   
   
-  // 参加確定処理 (備考パラメータ対応, 上限撤廃)
-  async function confirmParticipation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability, remarks = '') {
+ // 参加確定処理 (備考パラメータ対応, 上限撤廃)
+async function confirmParticipation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability, remarks = '') {
     debugLog('ConfirmParticipation', `参加確定処理: ${recruitmentId}, User: ${interaction.user.tag}`);
   
     const recruitment = activeRecruitments.get(recruitmentId);
-    // ... (募集存在チェック - エラー応答は editReply か followUp に統一する必要があるかも) ...
+
+    // 1. 最初に募集が存在するかチェック
     if (!recruitment || recruitment.status !== 'active') {
-      const replyOptions = { content: 'この募集は既に終了しているか、存在しません。', embeds: [], components: [], ephemeral: true };
+      const replyOptions = { content: 'この募集は既に終了しているか、存在しません。', ephemeral: true };
       try {
-          // defer 済みのはずなので editReply を試みる
           if (interaction.deferred || interaction.replied) await interaction.editReply(replyOptions);
-          else await interaction.reply(replyOptions); // 通常ここには来ないはず
+          else await interaction.reply(replyOptions);
       } catch (e) { console.error("参加確定前チェックエラー応答失敗:", e.message); }
-      return;
-  }
-
-  
-    const participantData = { userId: interaction.user.id, username: interaction.user.username, joinType: joinType, attributes: selectedAttributes, timeAvailability: timeAvailability, remarks: remarks || '', assignedAttribute: null, isTestParticipant: false };
-    const existingIndex = recruitment.participants.findIndex(p => p.userId === interaction.user.id);
-  
-    if (existingIndex >= 0) {
-      // 更新する場合
-      recruitment.participants[existingIndex] = participantData;
-      debugLog('ConfirmParticipation', `既存参加者情報を更新: ${interaction.user.username}`);
-    } else {
-      // ★★★ 上限チェック削除 ★★★
-      // if (recruitment.participants.length >= 6) { ... } // このブロックを削除
-      recruitment.participants.push(participantData);
-      debugLog('ConfirmParticipation', `新規参加者を追加: ${interaction.user.username}`);
+      return; // 募集がなければここで終了
     }
-  
-    try { await updateRecruitmentMessage(recruitment); }
-    catch (updateError) { console.error("参加確定後のメッセージ更新エラー:", updateError); }
-  
-    // ★★★ 完了メッセージ応答部分を修正 ★★★
-  const replyOptions = {
-    content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
-    embeds: [], components: [], ephemeral: true
-  };
-  try {
-      // deferReply されているはずなので editReply を使う
-      if (interaction.deferred || interaction.replied) { // deferred か replied 状態のはず
-          await interaction.editReply(replyOptions);
-      } else {
-          // deferされていない状況は異常だが、念のためreplyを試みる
-          console.warn("[ConfirmParticipation] Interaction was not deferred/replied before sending completion message.");
-          await interaction.reply(replyOptions);
-      }
-  } catch (error) {
-    console.error("参加完了メッセージ送信(editReply/reply)エラー:", error);
-    try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
-  }
 
-  
-    // ★★★ 参加者が7人になった時点でプレビュー ★★★
+    // ★★★ ここからが、名前を取得して参加者データを作成する処理です ★★★
+    try {
+        let member = interaction.member;
+        const user = interaction.user;
+
+        // 2. メンバー情報が不完全なら、サーバーから再取得を試みる
+        if (interaction.guild && (!member || !member.displayName)) {
+            console.log(`[User Info] Member data for ${user.id} might be incomplete. Fetching from guild...`);
+            try {
+                member = await interaction.guild.members.fetch(user.id);
+            } catch (fetchError) {
+                console.error(`[User Info] Failed to fetch member ${user.id}:`, fetchError);
+            }
+        }
+
+        // 3. 表示・保存する名前を決定する（ニックネーム優先）
+        const usernameToSave = member?.displayName || user.username;
+        console.log(`[User Info] User: ${user.username}, Determined display name: ${usernameToSave}`);
+
+        // 4. 決定した名前を使って参加者データを作成する
+        const participantData = {
+            userId: user.id,
+            username: usernameToSave, // ← 正しい名前をセット！
+            joinType: joinType,
+            attributes: selectedAttributes,
+            timeAvailability: timeAvailability,
+            remarks: remarks || '',
+            assignedAttribute: null,
+            isTestParticipant: false
+        };
+
+        // 5. 参加者リストに追加または更新する
+        const existingIndex = recruitment.participants.findIndex(p => p.userId === user.id);
+        if (existingIndex >= 0) {
+            recruitment.participants[existingIndex] = participantData;
+            debugLog('ConfirmParticipation', `既存参加者情報を更新: ${usernameToSave}`);
+        } else {
+            recruitment.participants.push(participantData);
+            debugLog('ConfirmParticipation', `新規参加者を追加: ${usernameToSave}`);
+        }
+
+    } catch (error) {
+        console.error(`Error during confirmParticipation for user ${interaction.user.id}:`, error);
+        await handleErrorReply(interaction, error, '参加確定処理中にサーバーがダウンしました。時間を改めてもう一度お願いします。');
+        return; // エラーが発生したらここで処理を終了
+    }
+    // ★★★ ここまで ★★★
+
+    // 6. メッセージの更新や完了通知など、残りの処理を行う
+    await updateRecruitmentMessage(recruitment);
+    
+    const replyOptions = {
+        content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
+        embeds: [], components: [], ephemeral: true
+    };
+    try {
+        if (interaction.deferred || interaction.replied) {
+            await interaction.editReply(replyOptions);
+        } else {
+            console.warn("[ConfirmParticipation] Interaction was not deferred/replied before sending completion message.");
+            await interaction.reply(replyOptions);
+        }
+    } catch (error) {
+        console.error("参加完了メッセージ送信(editReply/reply)エラー:", error);
+        try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
+    }
+
     if (recruitment.participants.length === 7 && recruitment.status === 'active') {
-      console.log("参加者が7人になったため、属性割り振りをプレビューします。");
-      try {
-          const channel = await client.channels.fetch(recruitment.channel);
-          if (channel && channel.isTextBased()) {
-              await channel.send({ content: `**[${recruitment.type}]** 参加者が7名になりました。属性割り振りのプレビューを行います。\n（募集はまだ締め切られていません）` });
-          }
-          await autoAssignAttributes(recruitment, true); // プレビュー実行
-          await updateRecruitmentMessage(recruitment); // プレビュー結果反映
-      } catch (e) {
-          console.error("自動割り振りプレビューエラー (7人到達時):", e);
-      }
+        console.log("参加者が7人になったため、属性割り振りをプレビューします。");
+        try {
+            const channel = await client.channels.fetch(recruitment.channel);
+            if (channel && channel.isTextBased()) {
+                await channel.send({ content: `**[${recruitment.type}]** 参加者が7名になりました。属性割り振りのプレビューを行います。\n（募集はまだ締め切られていません）` });
+            }
+            await autoAssignAttributes(recruitment, true);
+            await updateRecruitmentMessage(recruitment);
+        } catch (e) {
+            console.error("自動割り振りプレビューエラー (7人到達時):", e);
+        }
     }
     saveRecruitmentData();
-  }
+}
+
+  
+   
   
   
   // 参加キャンセル処理
