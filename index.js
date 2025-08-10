@@ -65,7 +65,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   const tempUserData = new Map(); // 一時的なユーザーデータ保存用 (モーダル連携用)
   const attributes = ['火', '水', '土', '風', '光', '闇']; // グラブルの属性
   // ★★★ ご要望に応じてレイドタイプを追加・変更できます ★★★
-  const raidTypes = ['天元', 'ルシゼロ', 'スパバハ', '参加者希望']; // レイドタイプ
+  const raidTypes = ['天元', 'ルシゼロ', 'ヴェルサシア', '参加者希望']; // レイドタイプ
   const NG_WORDS = ["死ね", "殺す", "馬鹿", "アホ", "氏ね", "ころす", "バカ", /* ... 他の不適切な単語を追加 ... */ ]; // NGワードリスト
   // ★★★ ご要望に応じて備考の最大文字数を25に変更 ★★★
   const MAX_REMARKS_LENGTH = 25; // 備考の最大文字数
@@ -1211,7 +1211,7 @@ saveRecruitmentData();
         if (finalRaidType === '天元') return p.joinType === '天元' || p.joinType === 'なんでも可';
         if (finalRaidType === 'ルシゼロ') return p.joinType === 'ルシゼロ' || p.joinType === 'なんでも可';
         // ★★★ 新しいレイドタイプを追加した場合はここも修正が必要です ★★★
-        if (finalRaidType === 'スパバハ') return p.joinType === 'スパバハ' || p.joinType === 'なんでも可';
+        if (finalRaidType === 'ヴェルサシア') return p.joinType === 'ヴェルサシア' || p.joinType === 'なんでも可';
         return false;
     }).map(p => ({ ...p, assignedAttribute: null }));
   
