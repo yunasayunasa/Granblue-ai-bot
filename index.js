@@ -1003,19 +1003,7 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
         try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
     }
 
-    if (recruitment.participants.length === 7 && recruitment.status === 'active') {
-        console.log("参加者が7人になったため、属性割り振りをプレビューします。");
-        try {
-            const channel = await client.channels.fetch(recruitment.channel);
-            if (channel && channel.isTextBased()) {
-                await channel.send({ content: `**[${recruitment.type}]** 参加者が7名になりました。属性割り振りのプレビューを行います。\n（募集はまだ締め切られていません）` });
-            }
-            await autoAssignAttributes(recruitment, true);
-            await updateRecruitmentMessage(recruitment);
-        } catch (e) {
-            console.error("自動割り振りプレビューエラー (7人到達時):", e);
-        }
-    }
+   
     saveRecruitmentData();
 }
 
