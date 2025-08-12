@@ -1209,12 +1209,47 @@ saveRecruitmentData();
   
     recruitment.participants.forEach(p => p.assignedAttribute = null);
   
-    let finalRaidType = recruitment.type;
+       let finalRaidType = recruitment.type;
     if (recruitment.type === '参加者希望') {
-      let tengenVotes = 0; let luciZeroVotes = 0;
-      recruitment.participants.forEach(p => { if (p.joinType === '天元') tengenVotes++; else if (p.joinType === 'ルシゼロ') luciZeroVotes++; else { tengenVotes += 0.5; luciZeroVotes += 0.5; } });
-      finalRaidType = tengenVotes >= luciZeroVotes ? '天元' : 'ルシゼロ';
-      debugLog('AutoAssign', `決定レイドタイプ: ${finalRaidType} (天元: ${tengenVotes}, ルシゼロ: ${luciZeroVotes})`);
+      // ★★★ ここから新しい多数決ロジック ★★★
+      const votes = {};
+      const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+      availableRaids.forEach(raid => { votes[raid] = 0; }); // 例: { '天元': 0, 'ルシゼロ': 0, 'スパバハ': 0 }
+
+      recruitment.participants.forEach(p => {
+        if (p.joinType === 'なんでも可') {
+          // 「なんでも可」は全レイドに0.5票ずつ加算
+          availableRaids.forEach(raid => { votes[raid] += 0.5; });
+        } else if (votes.hasOwnProperty(p.joinType)) {
+          // 特定のレイドへの投票はそのレイドに1票加算
+          votes[p.joinType] += 1;
+        }
+      });
+
+      // 最も票数の多いレイドを選ぶ
+      let maxVotes = -1;
+      let winningRaids = [];
+
+      for (const raid in votes) {
+        if (votes[raid] > maxVotes) {
+          maxVotes = votes[raid];
+          winningRaids = [raid]; // 新しい最大値なので、リストをリセット
+        } else if (votes[raid] === maxVotes) {
+          winningRaids.push(raid); // 同票なのでリストに追加
+        }
+      }
+
+      // 票が1つも入っていない場合（参加者0など）は、デフォルトで最初のレイドタイプにする
+      if (maxVotes <= 0) {
+        finalRaidType = availableRaids[0] || recruitment.type;
+      } else {
+        // 同票のレイドがある場合は、その中からランダムで1つ選ぶ（または最初のものを選ぶ）
+        finalRaidType = winningRaids[0]; // ここでは安定して最初のものを選ぶ
+      }
+      
+      const voteLog = Object.entries(votes).map(([k, v]) => `${k}: ${v}`).join(', ');
+      debugLog('AutoAssign', `決定レイドタイプ: ${finalRaidType} (投票結果: ${voteLog})`);
+      // ★★★ 新しい多数決ロジックここまで ★★★
     }
     recruitment.finalRaidType = finalRaidType;
   
