@@ -742,7 +742,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     const dateButtons = [];
     const today = new Date(); today.setHours(0, 0, 0, 0);
     // ★★★ ご要望に応じて当日を除外し、翌日以降の募集にする ★★★
-    for (let i = 1; i < 7; i++) {
+    for (let i = 1; i <= 7; i++) {
       const date = new Date(today); date.setDate(today.getDate() + i);
       const dateString = date.toISOString().split('T')[0];
       const displayDate = `${date.getMonth() + 1}/${date.getDate()}(${['日', '月', '火', '水', '木', '金', '土'][date.getDay()]})`;
