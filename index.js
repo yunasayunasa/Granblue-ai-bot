@@ -842,8 +842,19 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     const dateObj = new Date(recruitment.date + 'T00:00:00Z');
     const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
     let selectOptions = []; let embedDescription = `【${recruitment.type}】${formattedDate} ${recruitment.time}\n\n`;
-    if (recruitment.type === '参加者希望') {
-      selectOptions = [ { label: '天元 のみ希望', value: '天元' }, { label: 'ルシゼロ のみ希望', value: 'ルシゼロ' }, { label: 'どちらでも可', value: 'なんでも可' } ];
+   if (recruitment.type === '参加者希望') {
+      // ★★★ ここから修正 ★★★
+      // raidTypesから「参加者希望」を除いたリストで選択肢を動的に生成
+      selectOptions = raidTypes
+        .filter(type => type !== '参加者希望') // "参加者希望" 自体は選択肢から除外
+        .map(type => ({
+          label: `${type} のみ希望`,
+          value: type
+        }));
+      // 「どちらでも可」の選択肢を追加
+      selectOptions.push({ label: 'どちらでも可', value: 'なんでも可' });
+      // ★★★ ここまで修正 ★★★
+      
       embedDescription += '参加したいコンテンツを選択してください。';
     } else {
       selectOptions = [ { label: `${recruitment.type} に参加`, value: recruitment.type } ];
@@ -1207,13 +1218,13 @@ saveRecruitmentData();
     }
     recruitment.finalRaidType = finalRaidType;
   
-    const eligibleParticipants = recruitment.participants.filter(p => {
-        if (finalRaidType === '天元') return p.joinType === '天元' || p.joinType === 'なんでも可';
-        if (finalRaidType === 'ルシゼロ') return p.joinType === 'ルシゼロ' || p.joinType === 'なんでも可';
-        // ★★★ 新しいレイドタイプを追加した場合はここも修正が必要です ★★★
-        if (finalRaidType === 'ヴェルサシア') return p.joinType === 'ヴェルサシア' || p.joinType === 'なんでも可';
-        return false;
-    }).map(p => ({ ...p, assignedAttribute: null }));
+   const eligibleParticipants = recruitment.participants.filter(p => {
+        // ★★★ ここから修正 ★★★
+        // 最終決定したレイドタイプに参加希望を出しているか、
+        // または「なんでも可」で希望を出している参加者を抽出する
+        return p.joinType === finalRaidType || p.joinType === 'なんでも可';
+        // ★★★ ここまで修正 ★★★
+    }).map(p => ({ ...p, originalAttributes: p.attributes, assignedAttribute: null })); // 元の属性を保持
   
     debugLog('AutoAssign', `割り振り対象者数: ${eligibleParticipants.length}名 (タイプ: ${finalRaidType})`);
     if (eligibleParticipants.length === 0) {
