@@ -1845,6 +1845,7 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
   }
   
   // テスト参加者追加オプション表示
+    // テスト参加者追加オプション表示
   async function showTestParticipantAddOptions(interaction, recruitmentId) {
     if (!testMode.active) return interaction.reply({ content: 'テストモードが有効ではありません。', ephemeral: true });
     const recruitment = activeRecruitments.get(recruitmentId);
@@ -1852,7 +1853,8 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
     const currentCount = recruitment.participants.length;
   
      const options = [];
-    .forEach(num => {
+     // ★★★ ここを修正: [1, 3, 5, 7, 10] という配列に対して forEach を実行するように修正しました ★★★
+     [1, 3, 5, 7, 10].forEach(num => {
          options.push({
              label: `${num}人 追加`,
              value: String(num),
