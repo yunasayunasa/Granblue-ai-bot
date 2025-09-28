@@ -64,13 +64,15 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   let activeRecruitments = new Map(); // 現在進行中の募集を保持
   const tempUserData = new Map(); // 一時的なユーザーデータ保存用 (モーダル連携用)
   const attributes = ['火', '水', '土', '風', '光', '闇']; // グラブルの属性
-  const raidTypes = ['天元', 'ルシゼロ', '参加者希望']; // レイドタイプ
+  // ★★★ ご要望に応じてレイドタイプを追加・変更できます ★★★
+  const raidTypes = ['天元', 'ルシゼロ','スパバハ', 'ヴェルサシア', '参加者希望']; // レイドタイプ
   const NG_WORDS = ["死ね", "殺す", "馬鹿", "アホ", "氏ね", "ころす", "バカ", /* ... 他の不適切な単語を追加 ... */ ]; // NGワードリスト
-  const MAX_REMARKS_LENGTH = 100; // 備考の最大文字数
+  // ★★★ ご要望に応じて備考の最大文字数を25に変更 ★★★
+  const MAX_REMARKS_LENGTH = 25; // 備考の最大文字数
   
-  // 時間オプションを初期化 (00:00 - 23:00)
+  // ★★★ ご要望に応じて時間オプションを19時～23時に変更 ★★★
   const timeOptions = [];
-  for (let i = 0; i < 24; i++) {
+  for (let i = 19; i <= 23; i++) {
     const hour = i.toString().padStart(2, '0');
     timeOptions.push({
       label: `${hour}:00`,
@@ -471,7 +473,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
         if (!userData || userData.recruitmentId !== recruitmentId) {
            return await interaction.update({ content: 'エラー: 参加情報が見つからないか古くなっています。再度申込してください。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Confirm Direct Update Error:", e) });
         }
-        await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributes, userData.timeAvailability, '');
+        await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, '');
         tempUserData.delete(interaction.user.id);
       }
       // 参加申込キャンセルボタン (参加フロー中)
@@ -503,6 +505,11 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
       else if (customId === 'cancel_test_participants') {
           await interaction.update({ content: 'テスト参加者の追加をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Test Update Error:", e) });
       }
+      // ★★★ 追加: 複数レイド選択完了ボタン ★★★
+      else if (customId.startsWith('multi_raid_confirm_')) {
+        const recruitmentId = customId.replace('multi_raid_confirm_', '');
+        await startAttributeSelectionForRaids(interaction, recruitmentId);
+      }
       // その他の未処理ボタン
       else {
         console.warn(`未処理のボタンID: ${customId}`);
@@ -531,7 +538,8 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
       .setCustomId('remarks_input')
       .setLabel(`希望/遅刻/早退など (${MAX_REMARKS_LENGTH}文字以内)`)
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('例: 22時まで。初心者です。空欄でもOK。20文字まで表示')
+      // ★★★ ご要望に応じてプレースホルダーを修正 ★★★
+      .setPlaceholder('例: 22時まで。初心者です。25文字まで。')
       .setMaxLength(MAX_REMARKS_LENGTH)
       .setValue(userData.remarks || '')
       .setRequired(false);
@@ -594,8 +602,8 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     }
 
   
-      // 参加確定処理を呼び出し
-      await confirmParticipation( interaction, recruitmentId, userData.joinType, userData.attributes, userData.timeAvailability, remarks );
+      // ★★★ 呼び出し方を修正 ★★★
+      await confirmParticipation( interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, remarks );
   
       // 一時データ削除
       tempUserData.delete(interaction.user.id);
@@ -636,7 +644,15 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          if (parts.length < 3) throw new Error(`不正な参加タイプID: ${customId}`);
         const recruitmentId = parts[2];
         const selectedType = interaction.values[0];
-        await showAttributeSelection(interaction, recruitmentId, selectedType);
+        // ★★★ フローを分岐 ★★★
+        const recruitment = activeRecruitments.get(recruitmentId);
+        if (recruitment.type === '参加者希望') {
+          // 「参加者希望」募集の場合は、新しい専用のフローを呼び出す
+          await showMultiRaidSelection(interaction, recruitmentId, selectedType);
+        } else {
+          // 通常の募集の場合は、従来の属性選択フローを呼び出す
+          await showAttributeSelection(interaction, recruitmentId, selectedType);
+        }
       }
       // 属性選択
       else if (customId.startsWith('attribute_select_')) {
@@ -644,33 +660,26 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          if (parts.length < 4) throw new Error(`不正な属性選択ID: ${customId}`);
         const recruitmentId = parts[2];
         const joinType = parts[3];
-        const selectedAttributes = interaction.values;
+        let selectedAttributes = interaction.values;
+        // ★★★ 「全属性」選択の処理を追加 ★★★
+        if (selectedAttributes.includes('all_attributes')) {
+            selectedAttributes = [...attributes];
+        }
         await showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes);
       }
-      // 参加可能時間選択
-      else if (customId.startsWith('time_availability_')) {
-        const parts = customId.split('_');
-        if (parts.length < 5 && customId.length >= 100) { // IDが切り捨てられた可能性
-            console.warn(`参加可能時間選択IDが短い(${customId})。一時データを使用。`);
-            const userData = tempUserData.get(interaction.user.id);
-            if (!userData || !userData.recruitmentId || !userData.joinType || !userData.attributes) {
-                throw new Error('参加可能時間選択で一時データが見つからないか不完全。');
-            }
-            const recruitmentId = userData.recruitmentId;
-            const joinType = userData.joinType;
-            const selectedAttributes = userData.attributes;
-            const selectedTime = interaction.values[0];
-            await showJoinConfirmation(interaction, recruitmentId, joinType, selectedAttributes, selectedTime);
-        } else if (parts.length >= 5) { // 通常ケース
-            const recruitmentId = parts[2];
-            const joinType = parts[3];
-            const attributesStr = parts[4];
-            const selectedTime = interaction.values[0];
-            const selectedAttributes = attributesStr.split(',');
-            await showJoinConfirmation(interaction, recruitmentId, joinType, selectedAttributes, selectedTime);
-        } else {
-            throw new Error(`不正な参加可能時間ID形式: ${customId}`);
+      // ★★★ CustomIDの100文字制限対策を施した時間選択処理 ★★★
+      else if (customId.startsWith('time_availability_select_')) {
+        const recruitmentId = customId.replace('time_availability_select_', '');
+        const selectedTime = interaction.values[0];
+
+        // 一時データからユーザー情報を取得
+        const userData = tempUserData.get(interaction.user.id);
+        if (!userData || userData.recruitmentId !== recruitmentId) {
+            throw new Error('時間選択プロセスでユーザーデータが見つかりません。最初からやり直してください。');
         }
+
+        // 取得したデータを使って次のステップへ
+        await showJoinConfirmation(interaction, recruitmentId, userData.joinType, [], selectedTime);
       }
        // テスト参加者数選択メニュー
       else if (customId.startsWith('test_participant_count_')) {
@@ -679,6 +688,46 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          const count = parseInt(interaction.values[0], 10);
           if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${interaction.values[0]}`);
          await showTestParticipantConfirmation(interaction, recruitmentId, count);
+      }
+      // ★★★ 追加: 複数レイド選択メニュー ★★★
+      else if (customId.startsWith('multi_raid_select_')) {
+        const recruitmentId = customId.replace('multi_raid_select_', '');
+        const userData = tempUserData.get(interaction.user.id);
+        if (!userData) throw new Error('ユーザーデータが見つかりません');
+        
+        // 最初に選んだレイドと、追加で選んだレイドを結合する
+        const initialRaid = userData.raidsToSelect[0];
+        const additionalRaids = interaction.values;
+        // 重複を除いて結合
+        const combinedRaids = new Set([initialRaid, ...additionalRaids]);
+        userData.raidsToSelect = Array.from(combinedRaids);
+        tempUserData.set(interaction.user.id, userData);
+
+        // 確認メッセージを更新
+        await interaction.update({
+            content: `希望レイド: **${userData.raidsToSelect.join(', ')}**\n下のボタンを押して属性選択に進んでください。`,
+        });
+      }
+      // ★★★ 追加: レイドごとの属性選択メニュー ★★★
+      else if (customId.startsWith('attribute_select_per_raid_')) {
+        const recruitmentId = customId.replace('attribute_select_per_raid_', '');
+        const userData = tempUserData.get(interaction.user.id);
+        if (!userData) throw new Error('ユーザーデータが見つかりません');
+
+        const currentRaid = userData.raidsToSelect[userData.selectionIndex];
+        let selectedAttrs = interaction.values;
+        if (selectedAttrs.includes('all_attributes')) {
+            selectedAttrs = [...attributes];
+        }
+
+        // 一時データに現在のレイドの属性を保存
+        userData.attributesByRaid[currentRaid] = selectedAttrs;
+        // 次のレイドに進むためにインデックスを増やす
+        userData.selectionIndex++;
+        tempUserData.set(interaction.user.id, userData);
+
+        // 次の属性選択画面を表示
+        await showNextAttributeSelection(interaction, recruitmentId);
       }
       // その他のセレクトメニュー
       else {
@@ -749,7 +798,8 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   async function showDateSelection(interaction, raidType) {
     const dateButtons = [];
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    for (let i = 0; i < 7; i++) {
+    // ★★★ ご要望に応じて当日を除外し、翌日以降の募集にする ★★★
+    for (let i = 1; i <= 7; i++) {
       const date = new Date(today); date.setDate(today.getDate() + i);
       const dateString = date.toISOString().split('T')[0];
       const displayDate = `${date.getMonth() + 1}/${date.getDate()}(${['日', '月', '火', '水', '木', '金', '土'][date.getDay()]})`;
@@ -845,12 +895,18 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.reply({ content: 'この募集は現在参加を受け付けていません。', ephemeral: true });
     const existingParticipation = recruitment.participants.find(p => p.userId === interaction.user.id);
-    if (existingParticipation) return interaction.reply({ content: `✅参加表明済みです。\nタイプ: ${existingParticipation.joinType}, 属性: ${existingParticipation.attributes.join(',')}, 時間: ${existingParticipation.timeAvailability}${existingParticipation.remarks ? `\n備考: ${existingParticipation.remarks}` : ''}\n変更はキャンセル後再申込してください。`, ephemeral: true });
+    if (existingParticipation) return interaction.reply({ content: `✅参加表明済みです。変更はキャンセル後再申込してください。`, ephemeral: true });
     const dateObj = new Date(recruitment.date + 'T00:00:00Z');
     const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
     let selectOptions = []; let embedDescription = `【${recruitment.type}】${formattedDate} ${recruitment.time}\n\n`;
-    if (recruitment.type === '参加者希望') {
-      selectOptions = [ { label: '天元 のみ希望', value: '天元' }, { label: 'ルシゼロ のみ希望', value: 'ルシゼロ' }, { label: 'どちらでも可', value: 'なんでも可' } ];
+   if (recruitment.type === '参加者希望') {
+      selectOptions = raidTypes
+        .filter(type => type !== '参加者希望') 
+        .map(type => ({
+          label: `${type} のみ希望`,
+          value: type
+        }));
+      selectOptions.push({ label: 'どちらでも可', value: 'なんでも可' });
       embedDescription += '参加したいコンテンツを選択してください。';
     } else {
       selectOptions = [ { label: `${recruitment.type} に参加`, value: recruitment.type } ];
@@ -866,38 +922,188 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     // debugLog('AttributeSelection', `属性選択UI表示: ${recruitmentId}, Type: ${joinType}, User: ${interaction.user.tag}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
-    const attributeOptions = attributes.map(attr => ({ label: attr, value: attr, description: `${attr}属性で参加可能` }));
-    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`attribute_select_${recruitmentId}_${joinType}`).setPlaceholder('担当可能な属性を選択 (複数可)').setMinValues(1).setMaxValues(attributes.length).addOptions(attributeOptions));
+    
+    // ★★★ 「全属性」の選択肢を追加 ★★★
+    const attributeOptions = [
+        { label: '全属性', value: 'all_attributes', description: 'すべての属性で参加可能です' },
+        ...attributes.map(attr => ({ label: attr, value: attr, description: `${attr}属性で参加可能` }))
+      ];
+
+    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`attribute_select_${recruitmentId}_${joinType}`).setPlaceholder('担当可能な属性を選択 (複数可)').setMinValues(1).setMaxValues(attributeOptions.length).addOptions(attributeOptions));
     const embed = new EmbedBuilder().setTitle('🔮 属性選択').setDescription(`参加タイプ: **${joinType}**\n\n担当できる属性をすべて選択してください。`).setColor('#2ECC71');
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
   }
+
+// ★★★ 新規追加: 「参加者希望」時の複数レイド選択UI表示 ★★★
+async function showMultiRaidSelection(interaction, recruitmentId, firstSelectedRaid) {
+    // 一時データに参加情報をセットアップ
+    tempUserData.set(interaction.user.id, {
+      recruitmentId,
+      joinType: '参加者希望',
+      attributesByRaid: {}, 
+      raidsToSelect: [],
+      selectionIndex: 0,
+    });
   
+    const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+    
+    // ユーザーが「なんでも可」を選んだ場合
+    if (firstSelectedRaid === 'なんでも可') {
+      const userData = tempUserData.get(interaction.user.id);
+      userData.joinType = 'なんでも可'; // joinTypeを更新
+      tempUserData.set(interaction.user.id, userData);
+      // 既存の属性選択フローを呼び出す
+      await showAttributeSelection(interaction, recruitmentId, 'なんでも可');
+      return;
+    }
+    
+    // 特定のレイドを選んだ場合、他にも希望があるか確認する
+    let userData = tempUserData.get(interaction.user.id);
+    userData.raidsToSelect.push(firstSelectedRaid);
+    
+    const remainingRaids = availableRaids.filter(r => r !== firstSelectedRaid);
+  
+    const raidOptions = remainingRaids.map(raid => ({
+        label: raid,
+        value: raid
+    }));
+    
+    const embed = new EmbedBuilder()
+      .setTitle('他にも希望するレイドはありますか？')
+      .setDescription(`最初に **${firstSelectedRaid}** を選択しました。\n他にも希望するレイドがあれば選択してください（複数可）。\nなければ「選択を完了」ボタンを押してください。`)
+      .setColor('#2ECC71');
+  
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`multi_raid_select_${recruitmentId}`)
+      .setPlaceholder('追加で希望するレイドを選択')
+      .addOptions(raidOptions)
+      .setMinValues(0)
+      .setMaxValues(raidOptions.length);
+      
+    const row1 = new ActionRowBuilder().addComponents(menu);
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`multi_raid_confirm_${recruitmentId}`)
+        .setLabel('選択を完了して属性入力へ進む')
+        .setStyle(ButtonStyle.Success)
+    );
+  
+    await interaction.update({ embeds: [embed], components: [row1, row2] });
+}
+  
+// ★★★ 新規追加: レイドごとの属性選択プロセスを開始する関数 ★★★
+async function startAttributeSelectionForRaids(interaction, recruitmentId) {
+    const userData = tempUserData.get(interaction.user.id);
+    if (!userData || userData.raidsToSelect.length === 0) {
+        return interaction.update({ content: 'エラー: 希望レイドが選択されていません。', embeds: [], components: [] });
+    }
+    await showNextAttributeSelection(interaction, recruitmentId);
+}
+
+// ★★★ 新規追加: 次のレイドの属性選択UIを表示する関数 ★★★
+async function showNextAttributeSelection(interaction, recruitmentId) {
+    const userData = tempUserData.get(interaction.user.id);
+    const { selectionIndex, raidsToSelect } = userData;
+
+    if (selectionIndex >= raidsToSelect.length) {
+        // 全て完了したので、時間選択に進む
+        await showTimeAvailabilitySelection(interaction, recruitmentId, 'multi_raid_completed', []);
+        return;
+    }
+
+    const currentRaid = raidsToSelect[selectionIndex];
+    const attributeOptions = [
+        { label: '全属性', value: 'all_attributes', description: 'すべての属性で参加可能です' },
+        ...attributes.map(attr => ({ label: attr, value: attr }))
+    ];
+
+    const embed = new EmbedBuilder()
+        .setTitle(`【${selectionIndex + 1}/${raidsToSelect.length}】 ${currentRaid} の希望属性`)
+        .setDescription(`**${currentRaid}** で担当可能な属性をすべて選択してください。`)
+        .setColor('#2ECC71');
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId(`attribute_select_per_raid_${recruitmentId}`)
+        .setPlaceholder('担当可能な属性を選択 (複数可)')
+        .addOptions(attributeOptions)
+        .setMinValues(1)
+        .setMaxValues(attributeOptions.length);
+
+    await interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+}
+
+
   // 参加可能時間選択UI表示
   async function showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes) {
-    // debugLog('TimeSelection', `時間選択UI表示: ${recruitmentId}, Type: ${joinType}, Attr: [${selectedAttributes.join(',')}], User: ${interaction.user.tag}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
+    
     const timeSelectOptions = [ { label: '今すぐ参加可能', value: 'now', description: '募集開始時刻に関わらず参加' } ];
-    for (let i = 0; i < 24; i++) { const hour = i.toString().padStart(2, '0'); timeSelectOptions.push({ label: `${hour}:00 以降参加可能`, value: `${hour}:00` }); }
-    const attributesJoined = selectedAttributes.join(',');
-    tempUserData.set(interaction.user.id, { recruitmentId, joinType, attributes: selectedAttributes, timeAvailability: null, remarks: null });
-    const customId = `time_availability_${recruitmentId}_${joinType}_${attributesJoined}`;
-    if (customId.length > 100) console.warn(`CustomID長すぎ(${customId.length}文字)`);
-    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(customId.substring(0, 100)).setPlaceholder('参加可能な最も早い時間を選択').addOptions(timeSelectOptions));
-    const embed = new EmbedBuilder().setTitle('⏰ 参加可能時間の選択').setDescription(`参加タイプ: **${joinType}**\n選択属性: **${selectedAttributes.join(', ')}**\n\n参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`).setColor('#2ECC71');
+    for (let i = 19; i <= 23; i++) { 
+        const hour = i.toString().padStart(2, '0'); 
+        timeSelectOptions.push({ label: `${hour}:00 以降参加可能`, value: `${hour}:00` }); 
+    }
+    
+    // ★★★ 一時データへの保存ロジックを修正 ★★★
+    const currentUserData = tempUserData.get(interaction.user.id) || {};
+    if (joinType === 'multi_raid_completed') {
+        tempUserData.set(interaction.user.id, {
+            ...currentUserData,
+            recruitmentId,
+        });
+    } else {
+        const attributesByRaid = {};
+        if (joinType === 'なんでも可') {
+            const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+            availableRaids.forEach(raid => {
+                attributesByRaid[raid] = selectedAttributes;
+            });
+        } else {
+            attributesByRaid[joinType] = selectedAttributes;
+        }
+        tempUserData.set(interaction.user.id, {
+            ...currentUserData,
+            recruitmentId,
+            joinType: joinType,
+            attributesByRaid: attributesByRaid,
+        });
+    }
+
+    const customId = `time_availability_select_${recruitmentId}`;
+    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(customId).setPlaceholder('参加可能な最も早い時間を選択').addOptions(timeSelectOptions));
+    const embed = new EmbedBuilder().setTitle('⏰ 参加可能時間の選択').setDescription(`参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`).setColor('#2ECC71');
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
   }
   
   // 参加確認UI表示 (備考入力ボタン付き)
   async function showJoinConfirmation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability) {
-    // debugLog('JoinConfirm', `参加確認UI表示: ${recruitmentId}, Type: ${joinType}, Attr: [${selectedAttributes.join(',')}], Time: ${timeAvailability}, User: ${interaction.user.tag}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Join Confirm Update Error:", e) });
+    
+    // ★★★ userData の取得と表示を修正 ★★★
     const currentData = tempUserData.get(interaction.user.id) || {};
-    tempUserData.set(interaction.user.id, { ...currentData, recruitmentId, joinType, attributes: selectedAttributes, timeAvailability: timeAvailability, remarks: currentData.remarks || '' });
+    tempUserData.set(interaction.user.id, { ...currentData, timeAvailability: timeAvailability, remarks: currentData.remarks || '' });
+    
+    const userData = tempUserData.get(interaction.user.id);
+    const finalJoinType = userData.joinType;
+    const finalAttributesByRaid = userData.attributesByRaid;
+
     const embed = new EmbedBuilder().setTitle('✅ 参加申込内容 確認').setDescription('以下の内容で参加を申し込みます。よろしければ下のボタンを押してください。').setColor('#2ECC71')
-      .addFields( { name: '募集', value: `${recruitment.type} (${recruitment.date} ${recruitment.time})`, inline: false }, { name: '参加タイプ', value: joinType, inline: true }, { name: '担当可能属性', value: selectedAttributes.join(', '), inline: true }, { name: '参加可能時間', value: timeAvailability, inline: true })
-      .setFooter({text: '備考は「備考入力～」、なければ「参加確定(備考なし)」を'});
+      .addFields( 
+          { name: '募集', value: `${recruitment.type} (${recruitment.date} ${recruitment.time})`, inline: false }, 
+          { name: '参加タイプ', value: finalJoinType, inline: true }, 
+          { name: '参加可能時間', value: timeAvailability, inline: true }
+      );
+    
+    let attrDescription = Object.entries(finalAttributesByRaid)
+        .map(([raid, attrs]) => `**${raid}**: ${attrs.join(', ')}`)
+        .join('\n');
+    if(attrDescription.length > 1024) attrDescription = attrDescription.substring(0, 1021) + '...';
+    if(attrDescription) {
+        embed.addFields({ name: '担当可能属性', value: attrDescription, inline: false });
+    }
+
+    embed.setFooter({text: '備考は「備考入力～」、なければ「参加確定(備考なし)」を'});
      const openRemarksModalBtnId = `open_remarks_modal_${recruitmentId}`;
      const confirmDirectlyBtnId = `confirm_direct_${recruitmentId}`;
      const row = new ActionRowBuilder().addComponents( new ButtonBuilder().setCustomId(openRemarksModalBtnId).setLabel('備考入力して参加確定').setStyle(ButtonStyle.Primary).setEmoji('📝'), new ButtonBuilder().setCustomId(confirmDirectlyBtnId).setLabel('参加確定 (備考なし)').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('cancel_join').setLabel('キャンセル').setStyle(ButtonStyle.Danger));
@@ -905,28 +1111,25 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   }
   
   
- // 参加確定処理 (備考パラメータ対応, 上限撤廃)
-async function confirmParticipation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability, remarks = '') {
+// ★★★【重要】参加者データ構造を修正した関数 ★★★
+async function confirmParticipation(interaction, recruitmentId, joinType, attributesByRaid, timeAvailability, remarks = '') {
     debugLog('ConfirmParticipation', `参加確定処理: ${recruitmentId}, User: ${interaction.user.tag}`);
   
     const recruitment = activeRecruitments.get(recruitmentId);
 
-    // 1. 最初に募集が存在するかチェック
     if (!recruitment || recruitment.status !== 'active') {
       const replyOptions = { content: 'この募集は既に終了しているか、存在しません。', ephemeral: true };
       try {
           if (interaction.deferred || interaction.replied) await interaction.editReply(replyOptions);
           else await interaction.reply(replyOptions);
       } catch (e) { console.error("参加確定前チェックエラー応答失敗:", e.message); }
-      return; // 募集がなければここで終了
+      return;
     }
 
-    // ★★★ ここからが、名前を取得して参加者データを作成する処理です ★★★
     try {
         let member = interaction.member;
         const user = interaction.user;
 
-        // 2. メンバー情報が不完全なら、サーバーから再取得を試みる
         if (interaction.guild && (!member || !member.displayName)) {
             console.log(`[User Info] Member data for ${user.id} might be incomplete. Fetching from guild...`);
             try {
@@ -936,23 +1139,20 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
             }
         }
 
-        // 3. 表示・保存する名前を決定する（ニックネーム優先）
         const usernameToSave = member?.displayName || user.username;
         console.log(`[User Info] User: ${user.username}, Determined display name: ${usernameToSave}`);
 
-        // 4. 決定した名前を使って参加者データを作成する
         const participantData = {
             userId: user.id,
-            username: usernameToSave, // ← 正しい名前をセット！
+            username: usernameToSave,
             joinType: joinType,
-            attributes: selectedAttributes,
+            attributesByRaid: attributesByRaid, // ← 新しいデータ構造
             timeAvailability: timeAvailability,
             remarks: remarks || '',
             assignedAttribute: null,
             isTestParticipant: false
         };
 
-        // 5. 参加者リストに追加または更新する
         const existingIndex = recruitment.participants.findIndex(p => p.userId === user.id);
         if (existingIndex >= 0) {
             recruitment.participants[existingIndex] = participantData;
@@ -964,16 +1164,18 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
 
     } catch (error) {
         console.error(`Error during confirmParticipation for user ${interaction.user.id}:`, error);
-        await handleErrorReply(interaction, error, '参加確定処理中にサーバーがダウンしました。時間を改めてもう一度お願いします。');
-        return; // エラーが発生したらここで処理を終了
+        await handleErrorReply(interaction, error, '参加情報の登録中にサーバーエラーが発生しました。');
+        return;
     }
-    // ★★★ ここまで ★★★
-
-    // 6. メッセージの更新や完了通知など、残りの処理を行う
+    
     await updateRecruitmentMessage(recruitment);
     
+    let replyContent = '✅ 参加申込が完了しました！\n';
+    let attrText = Object.entries(attributesByRaid).map(([raid, attrs]) => `${raid}: ${attrs.join('/')}`).join(', ');
+    replyContent += `タイプ: ${joinType}, 属性: ${attrText}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : '');
+
     const replyOptions = {
-        content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
+        content: replyContent,
         embeds: [], components: [], ephemeral: true
     };
     try {
@@ -988,19 +1190,6 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
         try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
     }
 
-    if (recruitment.participants.length === 7 && recruitment.status === 'active') {
-        console.log("参加者が7人になったため、属性割り振りをプレビューします。");
-        try {
-            const channel = await client.channels.fetch(recruitment.channel);
-            if (channel && channel.isTextBased()) {
-                await channel.send({ content: `**[${recruitment.type}]** 参加者が7名になりました。属性割り振りのプレビューを行います。\n（募集はまだ締め切られていません）` });
-            }
-            await autoAssignAttributes(recruitment, true);
-            await updateRecruitmentMessage(recruitment);
-        } catch (e) {
-            console.error("自動割り振りプレビューエラー (7人到達時):", e);
-        }
-    }
     saveRecruitmentData();
 }
 
@@ -1031,14 +1220,9 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
   // 募集締め切り処理
   async function closeRecruitment(interaction, recruitmentId) {
     debugLog('CloseRecruitment', `募集締め切り処理: ${recruitmentId}, User: ${interaction.user.tag}`);
-    // ★★★ デバッグログ追加 ★★★
-  const currentKeys = Array.from(activeRecruitments.keys());
-  debugLog('CloseRecruitment', `現在のMapキー (${currentKeys.length}件):`, currentKeys.join(', '));
-  // ★★★ ここまで ★★★
-
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment) {
-      debugLog('CloseRecruitment', `エラー: ID ${recruitmentId} がMapに見つかりません。`); // なぜ見つからないかのログ
+      debugLog('CloseRecruitment', `エラー: ID ${recruitmentId} がMapに見つかりません。`);
       return await interaction.reply({ content: `締め切り対象の募集(ID: ${recruitmentId})が見つかりません。IDが正しいか、募集が削除されていないか確認してください。`, ephemeral: true });
     }
     const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
@@ -1062,7 +1246,7 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
     try { await updateRecruitmentMessage(recruitment); }
     catch (updateError) { console.error("締め切り後のメッセージ更新エラー:", updateError); }
     await interaction.reply({ content: '募集を締め切り、参加者の割り振りを行いました。', ephemeral: true });
-    // 割り振り結果をチャンネルに通知
+    
   try {
     const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
     if (channel && channel.isTextBased()) {
@@ -1071,18 +1255,16 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
                            `開催予定: ${recruitment.finalTime || recruitment.time}\n` +
                            `参加者 (${recruitment.participants.length}名) の割り振りが完了しました。\n`;
 
-         const assignedParticipants = recruitment.participants.filter(p => p?.assignedAttribute); // 安全アクセス
-         const unassignedParticipants = recruitment.participants.filter(p => !p?.assignedAttribute); // 安全アクセス
+         const assignedParticipants = recruitment.participants.filter(p => p?.assignedAttribute); 
+         const unassignedParticipants = recruitment.participants.filter(p => !p?.assignedAttribute); 
 
          attributes.forEach(attr => {
-            const p = assignedParticipants.find(pt => pt?.assignedAttribute === attr); // 安全アクセス
+            const p = assignedParticipants.find(pt => pt?.assignedAttribute === attr); 
             let participantText = '空き';
             if (p) {
                 participantText = `<@${p.userId}>`;
-                // ★★★ 備考があれば表示を追加 ★★★
                 if (p.remarks) {
-                    // ここでは備考内容も短く表示してみる
-                    participantText += ` (📝 ${p.remarks.substring(0, 20)}${p.remarks.length > 20 ? '...' : ''})`;
+                    participantText += ` (📝 ${p.remarks})`; // 備考を全文表示
                 }
             }
             assignedText += `【${attr}】: ${participantText}\n`;
@@ -1092,20 +1274,20 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
               assignedText += `\n**※以下の参加者は今回割り当てられませんでした:**\n`;
               assignedText += unassignedParticipants.map(p => `- <@${p.userId}>`).join('\n');
           }
-         // 割り当てられた参加者のみメンション
-         await channel.send({ content: assignedText, allowedMentions: { users: assignedParticipants.map(p => p.userId) } });
+         
+         const realUserIdsToMention = assignedParticipants.map(p => p.userId).filter(userId => /^\d+$/.test(userId));
+         await channel.send({ content: assignedText, allowedMentions: { users: realUserIdsToMention } });
     }
 } catch (notifyError) { console.error("割り振り結果通知エラー:", notifyError); }
 
-saveRecruitmentData(); // データ保存
+saveRecruitmentData();
 }
   
-  // 募集メッセージ更新処理 (上限撤廃対応)
+  // 募集メッセージ更新処理
   async function updateRecruitmentMessage(recruitment) {
     if (!recruitment || !recruitment.channel || !recruitment.messageId) {
         console.error("メッセージ更新に必要な情報が不足:", recruitment); return;
     }
-    // debugLog('UpdateMessage', `メッセージ更新開始: ${recruitment.id}, Status: ${recruitment.status}`);
     try {
       const channel = await client.channels.fetch(recruitment.channel);
       if (!channel || !channel.isTextBased()) {
@@ -1128,7 +1310,6 @@ saveRecruitmentData(); // データ保存
   
       if (recruitment.status === 'active') {
         contentText = `**【${recruitment.type} 募集中】** ${formattedDate} ${recruitment.time} 開始予定`;
-        // ★★★ 参加人数表示を上限なしに変更 ★★★
         description += `🟢 **募集中** (現在 ${recruitment.participants.length} 名)\n` +
                        `参加希望者は「参加申込」ボタンからどうぞ！\n\n`;
       } else if (recruitment.status === 'closed' || recruitment.status === 'assigned') {
@@ -1145,8 +1326,19 @@ saveRecruitmentData(); // データ保存
       if (recruitment.status === 'active' && recruitment.participants.length > 0) {
         description += '**【現在の参加表明者】**\n';
         recruitment.participants.forEach(p => {
-          description += `- <@${p.userId}> [${p.joinType}] ${p.attributes.join('/')} (${p.timeAvailability})`;
-          if (p.remarks) description += ` *備考: ${p.remarks.substring(0, 30)}${p.remarks.length > 30 ? '...': ''}*`;
+          // ★★★ 表示方法を修正 ★★★
+          let attrText = '';
+          if (p.joinType === 'なんでも可' && p.attributesByRaid) {
+              const firstKey = Object.keys(p.attributesByRaid)[0];
+              if(firstKey) attrText = `[${p.attributesByRaid[firstKey].join('/')}]`;
+          } else if (p.attributesByRaid) {
+              attrText = `[${Object.keys(p.attributesByRaid).join('/')}]`;
+          } else if (p.attributes) { // 古いデータ形式のためのフォールバック
+              attrText = `[${p.attributes.join('/')}]`
+          }
+
+          description += `- <@${p.userId}> ${p.joinType} ${attrText} (${p.timeAvailability})`;
+          if (p.remarks) description += ` *備考: ${p.remarks}*`;
           description += '\n';
         });
          description += '\n';
@@ -1157,7 +1349,6 @@ saveRecruitmentData(); // データ保存
         .setDescription(description)
         .setColor(recruitment.status === 'active' ? '#3498DB' : (recruitment.status === 'assigned' || recruitment.status === 'closed' ? '#E74C3C' : '#F1C40F'))
         .setTimestamp()
-        // ★★★ フッターの人数表示を上限なしに変更 ★★★
         .setFooter({ text: `募集ID: ${recruitment.id} | ${recruitment.status === 'active' ? `開催日 朝8時に自動締切 (${recruitment.participants.length}名)` : `募集終了 (${recruitment.participants.length}名)`}` });
   
       const fields = [];
@@ -1168,7 +1359,13 @@ saveRecruitmentData(); // データ保存
           if (assignedParticipant) value = `<@${assignedParticipant.userId}>${assignedParticipant.remarks ? ' 📝' : ''}`;
           else value = '空き';
         } else if (recruitment.status === 'active') {
-          const hopefuls = recruitment.participants.filter(p => p.attributes.includes(attr));
+          // ★★★ 希望者カウントのロジックを修正 ★★★
+          const hopefuls = recruitment.participants.filter(p => {
+              if (!p.attributesByRaid) { // 古いデータ形式のフォールバック
+                return p.attributes && p.attributes.includes(attr);
+              }
+              return Object.values(p.attributesByRaid).some(attrs => attrs.includes(attr));
+          });
           if (hopefuls.length > 0) value = hopefuls.length <= 2 ? hopefuls.map(p => `<@${p.userId}>`).join('\n') : `${hopefuls.length}名`;
           else value = '－';
         }
@@ -1182,13 +1379,12 @@ saveRecruitmentData(); // データ保存
         components.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`add_test_participants_${recruitment.id}`).setLabel('🧪テスト追加(管理)').setStyle(ButtonStyle.Secondary).setDisabled(recruitment.status !== 'active')));
       }
       await message.edit({ content: contentText, embeds: [embed], components: components });
-      // debugLog('UpdateMessage', `メッセージ更新完了: ${recruitment.id}`);
     } catch (error) {
        if (error.code !== 10008) console.error(`募集メッセージ ${recruitment?.messageId} 更新エラー:`, error);
     }
   }
   
-  // 属性自動割り振り処理 (上限なし対応)
+  // 属性自動割り振り処理
   async function autoAssignAttributes(recruitment, previewOnly = false) {
     debugLog('AutoAssign', `属性自動割り振り開始: ${recruitment.id}, Participants: ${recruitment.participants.length}, Preview: ${previewOnly}`);
   
@@ -1201,23 +1397,60 @@ saveRecruitmentData(); // データ保存
     if (!previewOnly) { recruitment.status = 'assigned'; debugLog('AutoAssign', `ステータスを 'assigned' に変更`); }
     else { debugLog('AutoAssign', `プレビューモード (ステータス: ${recruitment.status})`); }
   
-    // 割り当てリセット (プレビュー時も含む)
     recruitment.participants.forEach(p => p.assignedAttribute = null);
   
-    let finalRaidType = recruitment.type;
+       let finalRaidType = recruitment.type;
     if (recruitment.type === '参加者希望') {
-      let tengenVotes = 0; let luciZeroVotes = 0;
-      recruitment.participants.forEach(p => { if (p.joinType === '天元') tengenVotes++; else if (p.joinType === 'ルシゼロ') luciZeroVotes++; else { tengenVotes += 0.5; luciZeroVotes += 0.5; } });
-      finalRaidType = tengenVotes >= luciZeroVotes ? '天元' : 'ルシゼロ';
-      debugLog('AutoAssign', `決定レイドタイプ: ${finalRaidType} (天元: ${tengenVotes}, ルシゼロ: ${luciZeroVotes})`);
+      const votes = {};
+      const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+      availableRaids.forEach(raid => { votes[raid] = 0; });
+
+      recruitment.participants.forEach(p => {
+        if (p.joinType === 'なんでも可') {
+          availableRaids.forEach(raid => { votes[raid] += 0.5; });
+        } else if (p.attributesByRaid) {
+            Object.keys(p.attributesByRaid).forEach(raidKey => {
+                if (votes.hasOwnProperty(raidKey)) {
+                    votes[raidKey] += 1 / Object.keys(p.attributesByRaid).length; // 複数希望の場合は票を分割
+                }
+            })
+        }
+      });
+
+      let maxVotes = -1;
+      let winningRaids = [];
+      for (const raid in votes) {
+        if (votes[raid] > maxVotes) {
+          maxVotes = votes[raid];
+          winningRaids = [raid];
+        } else if (votes[raid] === maxVotes) {
+          winningRaids.push(raid);
+        }
+      }
+
+      if (maxVotes <= 0) {
+        finalRaidType = availableRaids[0] || recruitment.type;
+      } else {
+        finalRaidType = winningRaids[0];
+      }
+      
+      const voteLog = Object.entries(votes).map(([k, v]) => `${k}: ${v.toFixed(2)}`).join(', ');
+      debugLog('AutoAssign', `決定レイドタイプ: ${finalRaidType} (投票結果: ${voteLog})`);
     }
     recruitment.finalRaidType = finalRaidType;
   
-    const eligibleParticipants = recruitment.participants.filter(p => {
-        if (finalRaidType === '天元') return p.joinType === '天元' || p.joinType === 'なんでも可';
-        if (finalRaidType === 'ルシゼロ') return p.joinType === 'ルシゼロ' || p.joinType === 'なんでも可';
+   // ★★★ 割り振り対象者と属性の選定ロジックを修正 ★★★
+   const eligibleParticipants = recruitment.participants.filter(p => {
+        if (p.joinType === 'なんでも可') return true;
+        if (p.attributesByRaid && p.attributesByRaid[finalRaidType]) return true;
         return false;
-    }).map(p => ({ ...p, assignedAttribute: null })); // コピーを作成
+    }).map(p => {
+        const targetAttributes = (p.joinType === 'なんでも可' && p.attributesByRaid)
+            ? (Object.values(p.attributesByRaid)[0] || [])
+            : (p.attributesByRaid ? p.attributesByRaid[finalRaidType] : p.attributes) || [];
+        
+        return { ...p, attributes: targetAttributes, originalAttributes: targetAttributes, assignedAttribute: null };
+    });
   
     debugLog('AutoAssign', `割り振り対象者数: ${eligibleParticipants.length}名 (タイプ: ${finalRaidType})`);
     if (eligibleParticipants.length === 0) {
@@ -1235,20 +1468,18 @@ saveRecruitmentData(); // データ保存
     const assignments = {}; const attributeCounts = {};
     attributes.forEach(attr => attributeCounts[attr] = 0);
     eligibleParticipants.forEach(p => p.attributes.forEach(attr => { if (attributeCounts[attr] !== undefined) attributeCounts[attr]++; }));
-    // debugLog('AutoAssign', '属性希望者数:', attributeCounts); // ログ抑制
   
     eligibleParticipants.forEach(p => {
       p.attributeScores = {}; p.attributes.forEach(attr => p.attributeScores[attr] = 1 / Math.max(1, attributeCounts[attr]));
       p.priorityScore = (10 / Math.max(1, p.attributes.length)) + Math.max(0, ...p.attributes.map(attr => p.attributeScores[attr] || 0));
     });
     eligibleParticipants.sort((a, b) => b.priorityScore - a.priorityScore);
-    // debugLog('AutoAssign', 'ソート済参加者:', eligibleParticipants.map(p=>({u:p.username, s:p.priorityScore.toFixed(2)}))); // ログ抑制
   
     const assignedUserIds = new Set();
     attributes.forEach(attr => {
         const candidates = eligibleParticipants.filter(p => !assignedUserIds.has(p.userId) && p.attributes.includes(attr));
         if (candidates.length > 0) {
-            candidates.sort((a, b) => b.priorityScore - a.priorityScore); // 念のため再ソート
+            candidates.sort((a, b) => b.priorityScore - a.priorityScore);
             const chosenParticipant = candidates[0];
             assignments[attr] = chosenParticipant;
             chosenParticipant.assignedAttribute = attr;
@@ -1266,7 +1497,6 @@ saveRecruitmentData(); // データ保存
           debugLog('AutoAssign', `空き属性: ${emptyAttributes.join(', ')}`);
       }
   
-    // プレビューでない場合のみ結果を永続化
     if (!previewOnly) {
         recruitment.participants.forEach(p => {
             const assignedInfo = eligibleParticipants.find(ep => ep.userId === p.userId);
@@ -1274,13 +1504,11 @@ saveRecruitmentData(); // データ保存
         });
         debugLog('AutoAssign', '最終割り当て結果を反映しました。');
     } else {
-        // プレビューの場合は一時的に割り当て (updateRecruitmentMessage用)
          recruitment.participants.forEach(p => {
              const assignedInfo = eligibleParticipants.find(ep => ep.userId === p.userId);
              p.assignedAttribute = assignedInfo?.assignedAttribute || null;
          });
         debugLog('AutoAssign', 'プレビュー用に一時割り当て。');
-        // 注意: この一時的な割り当ては、後続処理で元に戻さない限り永続化される可能性がある
     }
     return recruitment;
   }
@@ -1289,120 +1517,99 @@ saveRecruitmentData(); // データ保存
   // 自動締め切りチェック処理
   function checkAutomaticClosing() {
     const now = new Date();
-    const activeRecruitmentEntries = Array.from(activeRecruitments.entries()).filter(([id, r]) => r?.status === 'active'); // ?. で安全にアクセス
+    const activeRecruitmentEntries = Array.from(activeRecruitments.entries()).filter(([id, r]) => r?.status === 'active');
   
-    if (activeRecruitmentEntries.length === 0) return; // アクティブがなければ終了
+    if (activeRecruitmentEntries.length === 0) return;
   
-    // debugLog('AutoCloseCheck', `チェック開始 - アクティブ募集数: ${activeRecruitmentEntries.length}`); // ログ抑制
-  
-    // checkAutomaticClosing 関数内の forEach ループの中
 activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
-  try { // ← 外側の try ブロック開始
-      // recruitment が null でないことを再確認
+  try {
       if (!recruitment || !recruitment.date) {
           console.warn(`[AutoCloseCheck] ID ${id} のデータが無効です。スキップします。`);
           return;
       }
       const raidDateStr = recruitment.date;
       const [year, month, day] = raidDateStr.split('-').map(Number);
-      // 日本時間の午前8時 (UTCの前日23時) を計算
       const closingTimeJST = new Date(Date.UTC(year, month - 1, day, 8, 0, 0) - (9 * 60 * 60 * 1000));
 
       if (now >= closingTimeJST) {
           debugLog('AutoCloseCheck', `募集ID: ${id} - 自動締切時刻 (${closingTimeJST.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} JST) 超過`);
 
-          // 既に処理済みでないか確認 (念のため)
           if (recruitment.status === 'closed' || recruitment.status === 'assigned') {
-               // console.log(`[AutoCloseCheck] ID ${id} は既に処理済み (${recruitment.status})。スキップします。`);
                return;
           }
 
-          recruitment.status = 'closed'; // 先に closed にマーク
+          recruitment.status = 'closed';
           debugLog('AutoCloseCheck', `ステータスを 'closed' に変更`);
 
-          await autoAssignAttributes(recruitment, false); // 割り振り実行 (ここで assigned になる)
-          await updateRecruitmentMessage(recruitment); // 募集メッセージ更新
+          await autoAssignAttributes(recruitment, false);
+          await updateRecruitmentMessage(recruitment);
 
-          // --- 通知送信部分 ---
           const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
           if (channel && channel.isTextBased()) {
               let assignedText = `**【${recruitment.finalRaidType || recruitment.type} 自動締切】**\n` +
                                  `ID: ${recruitment.id} (募集者: <@${recruitment.creator}>)\n` +
                                  `募集が自動的に締め切られ、参加者(${recruitment.participants.length}名)が割り振られました。\n` +
                                  `開催予定: ${recruitment.finalTime || recruitment.time}\n`;
-              const assignedP = recruitment.participants.filter(p => p?.assignedAttribute); // 安全アクセス
-              const unassignedP = recruitment.participants.filter(p => !p?.assignedAttribute); // 安全アクセス
-               // ★★★ ここから修正 ★★★
+              const assignedP = recruitment.participants.filter(p => p?.assignedAttribute);
+              const unassignedP = recruitment.participants.filter(p => !p?.assignedAttribute);
+              
                attributes.forEach(attr => {
-                const p = assignedP.find(pt => pt?.assignedAttribute === attr); // 割り当てられた参加者を探す (安全アクセス)
-                let participantText = '空き'; // デフォルトは「空き」
+                const p = assignedP.find(pt => pt?.assignedAttribute === attr);
+                let participantText = '空き';
                 if (p) {
-                    participantText = `<@${p.userId}>`; // 参加者IDでメンション
-                    // 備考があれば表示を追加
-                    if (p.remarks && p.remarks.trim() !== '') { // remarks が存在し、空文字列でない場合
-                        // 表示形式はお好みで調整してください (短縮表示の例)
-                        participantText += ` (📝 ${p.remarks.substring(0, 20)}${p.remarks.length > 20 ? '...' : ''})`;
-                        // 全文表示の場合 (文字数上限に注意)
-                        // participantText += ` (備考: ${p.remarks})`;
+                    participantText = `<@${p.userId}>`;
+                    if (p.remarks && p.remarks.trim() !== '') {
+                        participantText += ` (📝 ${p.remarks})`;
                     }
                 }
-                assignedText += `【${attr}】: ${participantText}\n`; // 組み立てたテキストを追加
+                assignedText += `【${attr}】: ${participantText}\n`;
              });
-             // ★★★ ここまで修正 ★★★
+             
               if (unassignedP.length > 0) assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n${unassignedP.map(p => `- <@${p.userId}>`).join('\n')}`;
 
-              // ★★★ ここからが通知送信の try...catch ★★★
               try {
-                  console.log(`[AutoCloseCheck] 通知送信試行 (Channel: ${channel.id}, Length: ${assignedText.length})`);
-
                   if (assignedText.length > 2000) {
                       console.warn(`[AutoCloseCheck] 通知メッセージが長すぎるため(${assignedText.length}文字)、短縮します。`);
                       assignedText = assignedText.substring(0, 1950) + '... (メッセージ省略)';
                   }
 
-                  // ★★★ メンション許可リストからテストユーザーIDを除外 ★★★
-    const realUserIdsToMention = assignedP
-    .map(p => p.userId) // まずユーザーIDの配列を取得
-    .filter(userId => /^\d+$/.test(userId)); // 数字のみで構成されるID（Snowflake形式）だけをフィルタリング
-    // または .filter(userId => !userId.startsWith('test-')) のような簡易的なチェックでも可
+                const realUserIdsToMention = assignedP
+                    .map(p => p.userId)
+                    .filter(userId => /^\d+$/.test(userId));
 
-console.log(`[AutoCloseCheck] メンション対象の実ユーザーID: ${realUserIdsToMention.join(', ') || 'なし'}`); // デバッグ用ログ
-
-await channel.send({
-    content: assignedText,
-    allowedMentions: {
-        // ★ フィルタリングされた実ユーザーIDの配列を使用 ★
-        users: realUserIdsToMention
-    }
-});
-debugLog('AutoCloseCheck', `自動締め切り通知完了 - ID: ${id}`);
-
-} catch (sendError) { // ★ send() のエラーをキャッチ
-console.error(`[AutoCloseCheck] ID ${id} の通知メッセージ送信エラー:`);
-console.error(sendError); // エラーオブジェクト全体を出力
-}
+                await channel.send({
+                    content: assignedText,
+                    allowedMentions: {
+                        users: realUserIdsToMention
+                    }
+                });
+                debugLog('AutoCloseCheck', `自動締め切り通知完了 - ID: ${id}`);
+                } catch (sendError) {
+                    console.error(`[AutoCloseCheck] ID ${id} の通知メッセージ送信エラー:`);
+                    console.error(sendError);
+                }
 
           } else {
               console.warn(`[AutoCloseCheck] ID ${id} の通知チャンネルが見つからないか、テキストチャンネルではありません。 (Channel ID: ${recruitment.channel})`);
           }
-          saveRecruitmentData(); // 締め切り処理が完了したら保存
+          saveRecruitmentData();
       }
-  } catch (error) { // ← 外側の try ブロックに対応する catch
+  } catch (error) {
       console.error(`[AutoCloseCheck] 募集ID ${id} 処理中に予期せぬエラー:`, error);
       if (recruitment) {
           try {
-              recruitment.status = 'error'; // エラー状態にする
+              recruitment.status = 'error';
               activeRecruitments.set(id, recruitment);
-              saveRecruitmentData(); // エラー状態を保存
+              saveRecruitmentData();
           } catch (e) {
               console.error("Error status setting/saving failed:", e);
           }
       }
   }
-}); // ← forEach の終わり
+});
   }
   
-  // 募集リスト表示機能 (上限撤廃対応)
+  // 募集リスト表示機能
   async function showActiveRecruitments(message) {
     const activeList = Array.from(activeRecruitments.values()).filter(r => r?.status === 'active');
     if (activeList.length === 0) return message.reply('現在、募集中のレイドはありません。 `!募集` で作成できます！');
@@ -1412,7 +1619,6 @@ console.error(sendError); // エラーオブジェクト全体を出力
        const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric', weekday: 'short' });
       const participantCount = recruitment.participants.length;
       const jumpLink = recruitment.messageId && recruitment.channel && message.guildId ? `[ここをクリック](https://discord.com/channels/${message.guildId}/${recruitment.channel}/${recruitment.messageId})` : 'リンク不明';
-      // ★★★ 参加人数表示を上限なしに変更 ★★★
       embed.addFields({ name: `${index + 1}. ${recruitment.type} - ${formattedDate} ${recruitment.time}`, value: `募集者: <@${recruitment.creator}>\n参加者: ${participantCount} 名\n${jumpLink}` });
     });
     await message.reply({ embeds: [embed] });
@@ -1446,14 +1652,14 @@ console.error(sendError); // エラーオブジェクト全体を出力
     }
   }
   
-  // ヘルプ表示機能 (上限撤廃対応)
+  // ヘルプ表示機能
   async function showHelp(message) {
     const embed = new EmbedBuilder().setTitle('📚 グラブル高難易度募集Bot ヘルプ').setDescription('天元・ルシゼロ等の高難易度レイド募集支援Bot').setColor('#1ABC9C')
       .addFields(
         { name: '🌟 基本コマンド', value: '`!募集` - 新規募集開始\n`!募集リスト` - アクティブ募集一覧\n`!募集ヘルプ` - このヘルプ\n`!IDリスト` - 全募集IDと状態' },
         { name: '⚙️ 募集の流れ', value: '1. `!募集`\n2. ボタンでレイドタイプ、日付、時間を選択\n3. 確認画面で「確定」→ 募集メッセージ投稿' },
-        { name: '🎮 参加の流れ', value: '1. 募集メッセージの「参加申込」\n2. （参加者希望の場合）コンテンツ選択\n3. 担当可能属性を複数選択\n4. 参加可能時間を選択\n5. 確認画面で「備考入力して参加確定」or「参加確定(備考なし)」\n6. （備考入力の場合）モーダルに入力して送信' },
-         { name: '👥 割り振りと締切', value: '- 参加者が**7名**に達すると、自動的に属性割り振りの**プレビュー**が行われます。\n- 募集メッセージの担当者表示はプレビュー結果です。\n- 開催日当日の**朝8時**に自動的に締め切られ、最終的な割り振りが行われます。\n- 募集者は「募集締め切り」ボタンで手動締め切りも可能です。\n- 最終割り振り結果は締切時に通知され、**6属性分が埋まらなかったり、参加者が溢れた場合は未割り当て**となります。'}, // ★★★ 上限撤廃の説明に変更
+        { name: '🎮 参加の流れ', value: '1. 募集メッセージの「参加申込」\n2. （参加者希望の場合）希望コンテンツを1つ以上選択\n3. 選択したコンテンツごとに担当可能属性を選択（「全属性」も選択可）\n4. 参加可能時間を選択\n5. 確認画面で「備考入力して参加確定」or「参加確定(備考なし)」\n6. （備考入力の場合）モーダルに入力して送信' },
+         { name: '👥 割り振りと締切', value: '- 参加者が**7名**に達すると、自動的に属性割り振りの**プレビュー**が行われます。\n- 募集メッセージの担当者表示はプレビュー結果です。\n- 開催日当日の**朝8時**に自動的に締め切られ、最終的な割り振りが行われます。\n- 募集者は「募集締め切り」ボタンで手動締め切りも可能です。\n- 最終割り振り結果は締切時に通知され、**6属性分が埋まらなかったり、参加者が溢れた場合は未割り当て**となります。'},
          { name: '🔧 管理者用コマンド', value: '`!募集削除 [ID]`\n`!テストモード開始/終了`\n`!テスト参加者追加 [ID] [人数]` (`!testadd`)\n`!追加 [ID]` (3名追加)\n`!直接テスト [ID] (人数)` (`!directtest`)\n`!募集確認 [ID]` (詳細デバッグ)\n`!募集詳細確認` (全概要デバッグ)\n`!再起動テスト`' }
       ).setFooter({ text: '不明点は管理者へ' });
     await message.reply({ embeds: [embed] });
@@ -1470,18 +1676,18 @@ console.error(sendError); // エラーオブジェクト全体を出力
      let participantsInfo = '**参加者情報:**\n';
      if (recruitment.participants.length > 0) {
          participantsInfo += '```json\n';
-         participantsInfo += JSON.stringify(recruitment.participants.map(p => ({ u: p.username, id: p.userId, type: p.joinType, attr: p.attributes, time: p.timeAvailability, assigned: p.assignedAttribute||'-', rmk: p.remarks||'', test: p.isTestParticipant||false })), null, 2);
+         participantsInfo += JSON.stringify(recruitment.participants.map(p => ({ u: p.username, id: p.userId, type: p.joinType, attr: p.attributesByRaid || p.attributes, time: p.timeAvailability, assigned: p.assignedAttribute||'-', rmk: p.remarks||'', test: p.isTestParticipant||false })), null, 2);
          participantsInfo += '\n```';
      } else participantsInfo += '参加者なし';
      const combined = details + '\n' + participantsInfo;
-     // 長文分割送信
+     
      try {
           if (combined.length <= 2000) await message.reply(combined);
           else {
               if (details.length <= 2000) await message.reply(details);
-              else for (let i = 0; i < details.length; i += 1950) await message.reply(details.substring(i, i + 1950));
+              else for (let i = 0; i < details.length; i += 1950) await message.reply({content: details.substring(i, i + 1950)});
               if (participantsInfo.length <= 2000) await message.channel.send(participantsInfo);
-              else for (let i = 0; i < participantsInfo.length; i += 1950) await message.channel.send(participantsInfo.substring(i, i + 1950));
+              else for (let i = 0; i < participantsInfo.length; i += 1950) await message.channel.send({content: participantsInfo.substring(i, i + 1950)});
           }
      } catch (e) { console.error("詳細表示エラー:", e); await message.reply("詳細情報の表示中にエラーが発生しました。").catch(()=>{}); }
   }
@@ -1499,18 +1705,18 @@ console.error(sendError); // エラーオブジェクト全体を出力
       debugInfo += `日時: ${data?.date || '?'} ${data?.time || '?'} | `;
       debugInfo += `Msg: ${data?.messageId || '?'} | `;
       debugInfo += `参加者: ${data?.participants?.length || 0}名 | `;
-      debugInfo += `作成: ${data?.createdAt ? new Date(data.createdAt).toLocaleTimeString('ja-JP') : '?'}\n`; // 時刻のみ表示
+      debugInfo += `作成: ${data?.createdAt ? new Date(data.createdAt).toLocaleTimeString('ja-JP') : '?'}\n`;
     });
-     // 長文分割
+     
      if (debugInfo.length > 1950) {
        const parts = []; for (let i = 0; i < debugInfo.length; i += 1950) parts.push(debugInfo.substring(i, i + 1950));
        await message.reply(`全 ${allRecruitments.length} 件募集データ（分割）:`);
-       for (const part of parts) await message.channel.send(part);
-     } else await message.reply(debugInfo);
+       for (const part of parts) await message.channel.send({content: part});
+     } else await message.reply({content: debugInfo});
   }
   
   //==========================================================================
-  // テストモード機能ブロック (上限撤廃対応)
+  // テストモード機能ブロック
   //==========================================================================
   
   // テストモード開始処理
@@ -1519,7 +1725,6 @@ console.error(sendError); // エラーオブジェクト全体を出力
     const embed = new EmbedBuilder().setTitle('🧪 テストモード開始').setDescription('テストモード**有効**。\nテスト参加者追加ボタン表示、管理者コマンド利用可。\n`!テストモード終了` で無効化。').setColor('#FF9800').setTimestamp();
     await message.reply({ embeds: [embed] });
     debugLog('TestMode', `テストモード開始, By: ${message.author.tag}`);
-     // 既存アクティブ募集を更新
      for (const recruitment of Array.from(activeRecruitments.values()).filter(r => r?.status === 'active')) { try { await updateRecruitmentMessage(recruitment); } catch (e) { console.error(`テストモード開始時Msg更新エラー(ID:${recruitment.id}):`, e); } }
   }
   
@@ -1531,7 +1736,6 @@ console.error(sendError); // エラーオブジェクト全体を出力
     const embed = new EmbedBuilder().setTitle('✅ テストモード終了').setDescription(`テストモード**無効**。\n追加されていた ${removedCount} 名のテスト参加者を削除。`).setColor('#4CAF50').setTimestamp();
     await message.reply({ embeds: [embed] });
     debugLog('TestMode', `テストモード終了, By: ${message.author.tag}, 削除: ${removedCount}`);
-     // 既存アクティブ募集を更新
      for (const recruitment of Array.from(activeRecruitments.values()).filter(r => r?.status === 'active')) { try { await updateRecruitmentMessage(recruitment); } catch (e) { console.error(`テストモード終了時Msg更新エラー(ID:${recruitment.id}):`, e); } }
   }
   
@@ -1539,13 +1743,12 @@ console.error(sendError); // エラーオブジェクト全体を出力
   async function clearAllTestParticipants() {
       let removedCount = 0;
       activeRecruitments.forEach((recruitment) => {
-          if (!recruitment?.participants) return; // 安全チェック
+          if (!recruitment?.participants) return;
           const initialCount = recruitment.participants.length;
           recruitment.participants = recruitment.participants.filter(p => !p.isTestParticipant);
           removedCount += (initialCount - recruitment.participants.length);
       });
       testMode.testParticipants = [];
-      // メッセージ更新は呼び出し元で行う
       return removedCount;
   }
   
@@ -1570,22 +1773,44 @@ console.error(sendError); // エラーオブジェクト全体を出力
     return `[${prefixes[Math.floor(Math.random()*prefixes.length)]}${index}]${roles[Math.floor(Math.random()*roles.length)]}`;
   }
   
-  // テスト参加者追加処理 (!テスト参加者追加 コマンドから, 上限撤廃)
+  // テスト参加者追加処理
   async function addTestParticipants(message, recruitmentId, count) {
     if (!testMode.active) return message.reply('テストモードが有効ではありません。`!テストモード開始` で有効にしてください。');
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment) return message.reply(`ID「${recruitmentId}」が見つかりません。`);
     if (recruitment.status !== 'active') return message.reply(`募集 (ID: ${recruitmentId}) はアクティブではありません（状態: ${recruitment.status}）。`);
   
-    // ★★★ 上限チェック削除 ★★★
-    // if (recruitment.participants.length + count > 6) { ... }
-  
     const addedParticipants = [];
     for (let i = 0; i < count; i++) {
       const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
       const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
-      let joinType; if (recruitment.type === '参加者希望') { const types = ['天元', 'ルシゼロ', 'なんでも可']; joinType = types[Math.floor(Math.random() * types.length)]; } else { joinType = recruitment.type; }
-      const testParticipant = { userId: testUserId, username: testUsername, joinType: joinType, attributes: getRandomAttributes(), timeAvailability: getRandomTimeAvailability(), remarks: '', assignedAttribute: null, isTestParticipant: true };
+      let joinType, attributesByRaid = {};
+      
+      if (recruitment.type === '参加者希望') { 
+          const types = ['天元', 'ルシゼロ', 'なんでも可']; 
+          joinType = types[Math.floor(Math.random() * types.length)];
+          const availableRaids = raidTypes.filter(t => t !== '参加者希望');
+          if(joinType === 'なんでも可') {
+              const attrs = getRandomAttributes();
+              availableRaids.forEach(r => attributesByRaid[r] = attrs);
+          } else {
+              attributesByRaid[joinType] = getRandomAttributes();
+          }
+      } else { 
+          joinType = recruitment.type; 
+          attributesByRaid[joinType] = getRandomAttributes();
+      }
+
+      const testParticipant = { 
+          userId: testUserId, 
+          username: testUsername, 
+          joinType: joinType, 
+          attributesByRaid: attributesByRaid,
+          timeAvailability: getRandomTimeAvailability(), 
+          remarks: '', 
+          assignedAttribute: null, 
+          isTestParticipant: true 
+      };
       recruitment.participants.push(testParticipant);
       testMode.testParticipants.push(testParticipant);
       addedParticipants.push(testParticipant);
@@ -1594,17 +1819,18 @@ console.error(sendError); // エラーオブジェクト全体を出力
     try {
       await updateRecruitmentMessage(recruitment);
       const embed = new EmbedBuilder().setTitle('🧪 テスト参加者 追加完了').setDescription(`募集ID: \`${recruitmentId}\` に ${addedParticipants.length} 名のテスト参加者を追加しました。\n現在の参加者数: ${recruitment.participants.length} 名`).setColor('#2196F3').setTimestamp();
-      addedParticipants.slice(0, 5).forEach((p, index) => embed.addFields({ name: `${index + 1}. ${p.username}`, value: `Type:${p.joinType}, Attr:${p.attributes.join('/')}, Time:${p.timeAvailability}`, inline: false }));
+      addedParticipants.slice(0, 5).forEach((p, index) => {
+          const attrText = Object.entries(p.attributesByRaid).map(([r, a]) => `${r}:${a.join('/')}`).join(' ');
+          embed.addFields({ name: `${index + 1}. ${p.username}`, value: `Type:${p.joinType}, Attr:${attrText}, Time:${p.timeAvailability}`, inline: false });
+      });
        if (addedParticipants.length > 5) embed.addFields({ name: '...', value: `他 ${addedParticipants.length - 5} 名`, inline: false });
       await message.reply({ embeds: [embed] });
   
-      // ★★★ 参加者が7人になった時点でプレビュー ★★★
       if (recruitment.participants.length === 7 && recruitment.status === 'active') {
         await message.channel.send(`参加者が7名になったため、ID "${recruitmentId}" の属性割り振りをプレビュー表示します...`);
         await autoAssignAttributes(recruitment, true);
         await updateRecruitmentMessage(recruitment);
       } else if (recruitment.participants.length > 7 && recruitment.status === 'active' && count > 0) {
-          // 7人を超えて追加された場合も、プレビューを更新する (任意)
           await message.channel.send(`テスト参加者追加により、ID "${recruitmentId}" の属性割り振りプレビューを更新します...`);
           await autoAssignAttributes(recruitment, true);
           await updateRecruitmentMessage(recruitment);
@@ -1618,16 +1844,15 @@ console.error(sendError); // エラーオブジェクト全体を出力
     }
   }
   
-  // テスト参加者追加オプション表示 (ボタンから, 上限撤廃)
+  // テスト参加者追加オプション表示
   async function showTestParticipantAddOptions(interaction, recruitmentId) {
     if (!testMode.active) return interaction.reply({ content: 'テストモードが有効ではありません。', ephemeral: true });
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.reply({ content: 'この募集は既に終了しているか、存在しません。', ephemeral: true });
     const currentCount = recruitment.participants.length;
   
-     // ★★★ 上限チェック削除、選択肢を固定に ★★★
      const options = [];
-     [1, 3, 5, 7, 10].forEach(num => { // 1, 3, 5, 7, 10 人の選択肢
+    .forEach(num => {
          options.push({
              label: `${num}人 追加`,
              value: String(num),
@@ -1640,35 +1865,54 @@ console.error(sendError); // エラーオブジェクト全体を出力
     await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
   }
   
-  // テスト参加者追加確認UI表示 (セレクトメニューから, 上限撤廃)
+  // テスト参加者追加確認UI表示
   async function showTestParticipantConfirmation(interaction, recruitmentId, count) {
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は既に終了しているか、存在しません。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
     const currentPCount = recruitment.participants.length;
-  
-    // ★★★ 上限チェック削除 ★★★
-    // if (currentPCount + count > 6) { ... }
   
     const embed = new EmbedBuilder().setTitle('🧪 テスト参加者 追加確認').setDescription(`募集ID: \`${recruitmentId}\` に **${count} 名** のテスト参加者を追加します。\n\n` + `現在の参加者数: ${currentPCount} 名\n` + `追加後の参加者数: ${currentPCount + count} 名`).setColor('#2196F3');
     const row = new ActionRowBuilder().addComponents( new ButtonBuilder().setCustomId(`confirm_test_participants_${recruitmentId}_${count}`).setLabel(`${count}名 追加`).setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('cancel_test_participants').setLabel('キャンセル').setStyle(ButtonStyle.Danger));
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
   }
   
-  // テスト参加者追加確定処理 (確認ボタンから, 上限撤廃)
+  // テスト参加者追加確定処理
   async function confirmAddTestParticipants(interaction, recruitmentId, count) {
     if (!testMode.active) return interaction.update({ content: 'テストモードが有効ではありません。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は既に終了しているか、存在しません。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
   
-    // ★★★ 上限チェック削除 ★★★
-    // const currentPCount = recruitment.participants.length; if (currentPCount + count > 6) { ... }
-  
     const addedParticipants = [];
     for (let i = 0; i < count; i++) {
-      const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
-      const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
-      let joinType; if (recruitment.type === '参加者希望') { const types = ['天元', 'ルシゼロ', 'なんでも可']; joinType = types[Math.floor(Math.random() * types.length)]; } else { joinType = recruitment.type; }
-      const testParticipant = { userId: testUserId, username: testUsername, joinType: joinType, attributes: getRandomAttributes(), timeAvailability: getRandomTimeAvailability(), remarks: '', assignedAttribute: null, isTestParticipant: true };
+        const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
+        const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
+        let joinType, attributesByRaid = {};
+        
+        if (recruitment.type === '参加者希望') { 
+            const types = ['天元', 'ルシゼロ', 'なんでも可']; 
+            joinType = types[Math.floor(Math.random() * types.length)];
+            const availableRaids = raidTypes.filter(t => t !== '参加者希望');
+            if(joinType === 'なんでも可') {
+                const attrs = getRandomAttributes();
+                availableRaids.forEach(r => attributesByRaid[r] = attrs);
+            } else {
+                attributesByRaid[joinType] = getRandomAttributes();
+            }
+        } else { 
+            joinType = recruitment.type; 
+            attributesByRaid[joinType] = getRandomAttributes();
+        }
+  
+        const testParticipant = { 
+            userId: testUserId, 
+            username: testUsername, 
+            joinType: joinType, 
+            attributesByRaid: attributesByRaid,
+            timeAvailability: getRandomTimeAvailability(), 
+            remarks: '', 
+            assignedAttribute: null, 
+            isTestParticipant: true 
+        };
       recruitment.participants.push(testParticipant);
       testMode.testParticipants.push(testParticipant);
       addedParticipants.push(testParticipant);
@@ -1677,18 +1921,15 @@ console.error(sendError); // エラーオブジェクト全体を出力
     try {
       await updateRecruitmentMessage(recruitment);
   
-      // ★★★ 参加者が7人になった時点でプレビュー ★★★
       let autoAssignTriggered = false;
       if (recruitment.participants.length >= 7 && (recruitment.participants.length - addedParticipants.length < 7) && recruitment.status === 'active') {
-         // 7人目に達した場合のみプレビュー
          await autoAssignAttributes(recruitment, true);
          await updateRecruitmentMessage(recruitment);
          autoAssignTriggered = true;
       } else if (recruitment.participants.length > 7 && addedParticipants.length > 0 && recruitment.status === 'active') {
-          // 7人を超えて追加された場合もプレビュー更新 (任意)
           await autoAssignAttributes(recruitment, true);
           await updateRecruitmentMessage(recruitment);
-          autoAssignTriggered = true; // 更新したことを示す
+          autoAssignTriggered = true;
       }
   
   
