@@ -473,7 +473,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
         if (!userData || userData.recruitmentId !== recruitmentId) {
            return await interaction.update({ content: 'エラー: 参加情報が見つからないか古くなっています。再度申込してください。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Confirm Direct Update Error:", e) });
         }
-        await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributes, userData.timeAvailability, '');
+        await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, '');
         tempUserData.delete(interaction.user.id);
       }
       // 参加申込キャンセルボタン (参加フロー中)
@@ -504,6 +504,11 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
       // テスト参加者キャンセルボタン (確認UI上)
       else if (customId === 'cancel_test_participants') {
           await interaction.update({ content: 'テスト参加者の追加をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Test Update Error:", e) });
+      }
+      // ★★★ 追加: 複数レイド選択完了ボタン ★★★
+      else if (customId.startsWith('multi_raid_confirm_')) {
+        const recruitmentId = customId.replace('multi_raid_confirm_', '');
+        await startAttributeSelectionForRaids(interaction, recruitmentId);
       }
       // その他の未処理ボタン
       else {
@@ -597,8 +602,8 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     }
 
   
-      // 参加確定処理を呼び出し
-      await confirmParticipation( interaction, recruitmentId, userData.joinType, userData.attributes, userData.timeAvailability, remarks );
+      // ★★★ 呼び出し方を修正 ★★★
+      await confirmParticipation( interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, remarks );
   
       // 一時データ削除
       tempUserData.delete(interaction.user.id);
@@ -639,7 +644,15 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          if (parts.length < 3) throw new Error(`不正な参加タイプID: ${customId}`);
         const recruitmentId = parts[2];
         const selectedType = interaction.values[0];
-        await showAttributeSelection(interaction, recruitmentId, selectedType);
+        // ★★★ フローを分岐 ★★★
+        const recruitment = activeRecruitments.get(recruitmentId);
+        if (recruitment.type === '参加者希望') {
+          // 「参加者希望」募集の場合は、新しい専用のフローを呼び出す
+          await showMultiRaidSelection(interaction, recruitmentId, selectedType);
+        } else {
+          // 通常の募集の場合は、従来の属性選択フローを呼び出す
+          await showAttributeSelection(interaction, recruitmentId, selectedType);
+        }
       }
       // 属性選択
       else if (customId.startsWith('attribute_select_')) {
@@ -647,7 +660,11 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          if (parts.length < 4) throw new Error(`不正な属性選択ID: ${customId}`);
         const recruitmentId = parts[2];
         const joinType = parts[3];
-        const selectedAttributes = interaction.values;
+        let selectedAttributes = interaction.values;
+        // ★★★ 「全属性」選択の処理を追加 ★★★
+        if (selectedAttributes.includes('all_attributes')) {
+            selectedAttributes = [...attributes];
+        }
         await showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes);
       }
       // ★★★ CustomIDの100文字制限対策を施した時間選択処理 ★★★
@@ -662,7 +679,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
         }
 
         // 取得したデータを使って次のステップへ
-        await showJoinConfirmation(interaction, recruitmentId, userData.joinType, userData.attributes, selectedTime);
+        await showJoinConfirmation(interaction, recruitmentId, userData.joinType, [], selectedTime);
       }
        // テスト参加者数選択メニュー
       else if (customId.startsWith('test_participant_count_')) {
@@ -671,6 +688,46 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
          const count = parseInt(interaction.values[0], 10);
           if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${interaction.values[0]}`);
          await showTestParticipantConfirmation(interaction, recruitmentId, count);
+      }
+      // ★★★ 追加: 複数レイド選択メニュー ★★★
+      else if (customId.startsWith('multi_raid_select_')) {
+        const recruitmentId = customId.replace('multi_raid_select_', '');
+        const userData = tempUserData.get(interaction.user.id);
+        if (!userData) throw new Error('ユーザーデータが見つかりません');
+        
+        // 最初に選んだレイドと、追加で選んだレイドを結合する
+        const initialRaid = userData.raidsToSelect[0];
+        const additionalRaids = interaction.values;
+        // 重複を除いて結合
+        const combinedRaids = new Set([initialRaid, ...additionalRaids]);
+        userData.raidsToSelect = Array.from(combinedRaids);
+        tempUserData.set(interaction.user.id, userData);
+
+        // 確認メッセージを更新
+        await interaction.update({
+            content: `希望レイド: **${userData.raidsToSelect.join(', ')}**\n下のボタンを押して属性選択に進んでください。`,
+        });
+      }
+      // ★★★ 追加: レイドごとの属性選択メニュー ★★★
+      else if (customId.startsWith('attribute_select_per_raid_')) {
+        const recruitmentId = customId.replace('attribute_select_per_raid_', '');
+        const userData = tempUserData.get(interaction.user.id);
+        if (!userData) throw new Error('ユーザーデータが見つかりません');
+
+        const currentRaid = userData.raidsToSelect[userData.selectionIndex];
+        let selectedAttrs = interaction.values;
+        if (selectedAttrs.includes('all_attributes')) {
+            selectedAttrs = [...attributes];
+        }
+
+        // 一時データに現在のレイドの属性を保存
+        userData.attributesByRaid[currentRaid] = selectedAttrs;
+        // 次のレイドに進むためにインデックスを増やす
+        userData.selectionIndex++;
+        tempUserData.set(interaction.user.id, userData);
+
+        // 次の属性選択画面を表示
+        await showNextAttributeSelection(interaction, recruitmentId);
       }
       // その他のセレクトメニュー
       else {
@@ -838,23 +895,18 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.reply({ content: 'この募集は現在参加を受け付けていません。', ephemeral: true });
     const existingParticipation = recruitment.participants.find(p => p.userId === interaction.user.id);
-    if (existingParticipation) return interaction.reply({ content: `✅参加表明済みです。\nタイプ: ${existingParticipation.joinType}, 属性: ${existingParticipation.attributes.join(',')}, 時間: ${existingParticipation.timeAvailability}${existingParticipation.remarks ? `\n備考: ${existingParticipation.remarks}` : ''}\n変更はキャンセル後再申込してください。`, ephemeral: true });
+    if (existingParticipation) return interaction.reply({ content: `✅参加表明済みです。変更はキャンセル後再申込してください。`, ephemeral: true });
     const dateObj = new Date(recruitment.date + 'T00:00:00Z');
     const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
     let selectOptions = []; let embedDescription = `【${recruitment.type}】${formattedDate} ${recruitment.time}\n\n`;
    if (recruitment.type === '参加者希望') {
-      // ★★★ ここから修正 ★★★
-      // raidTypesから「参加者希望」を除いたリストで選択肢を動的に生成
       selectOptions = raidTypes
-        .filter(type => type !== '参加者希望') // "参加者希望" 自体は選択肢から除外
+        .filter(type => type !== '参加者希望') 
         .map(type => ({
           label: `${type} のみ希望`,
           value: type
         }));
-      // 「どちらでも可」の選択肢を追加
       selectOptions.push({ label: 'どちらでも可', value: 'なんでも可' });
-      // ★★★ ここまで修正 ★★★
-      
       embedDescription += '参加したいコンテンツを選択してください。';
     } else {
       selectOptions = [ { label: `${recruitment.type} に参加`, value: recruitment.type } ];
@@ -870,52 +922,188 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     // debugLog('AttributeSelection', `属性選択UI表示: ${recruitmentId}, Type: ${joinType}, User: ${interaction.user.tag}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
-    const attributeOptions = attributes.map(attr => ({ label: attr, value: attr, description: `${attr}属性で参加可能` }));
-    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`attribute_select_${recruitmentId}_${joinType}`).setPlaceholder('担当可能な属性を選択 (複数可)').setMinValues(1).setMaxValues(attributes.length).addOptions(attributeOptions));
+    
+    // ★★★ 「全属性」の選択肢を追加 ★★★
+    const attributeOptions = [
+        { label: '全属性', value: 'all_attributes', description: 'すべての属性で参加可能です' },
+        ...attributes.map(attr => ({ label: attr, value: attr, description: `${attr}属性で参加可能` }))
+      ];
+
+    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`attribute_select_${recruitmentId}_${joinType}`).setPlaceholder('担当可能な属性を選択 (複数可)').setMinValues(1).setMaxValues(attributeOptions.length).addOptions(attributeOptions));
     const embed = new EmbedBuilder().setTitle('🔮 属性選択').setDescription(`参加タイプ: **${joinType}**\n\n担当できる属性をすべて選択してください。`).setColor('#2ECC71');
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
   }
+
+// ★★★ 新規追加: 「参加者希望」時の複数レイド選択UI表示 ★★★
+async function showMultiRaidSelection(interaction, recruitmentId, firstSelectedRaid) {
+    // 一時データに参加情報をセットアップ
+    tempUserData.set(interaction.user.id, {
+      recruitmentId,
+      joinType: '参加者希望',
+      attributesByRaid: {}, 
+      raidsToSelect: [],
+      selectionIndex: 0,
+    });
   
+    const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+    
+    // ユーザーが「なんでも可」を選んだ場合
+    if (firstSelectedRaid === 'なんでも可') {
+      const userData = tempUserData.get(interaction.user.id);
+      userData.joinType = 'なんでも可'; // joinTypeを更新
+      tempUserData.set(interaction.user.id, userData);
+      // 既存の属性選択フローを呼び出す
+      await showAttributeSelection(interaction, recruitmentId, 'なんでも可');
+      return;
+    }
+    
+    // 特定のレイドを選んだ場合、他にも希望があるか確認する
+    let userData = tempUserData.get(interaction.user.id);
+    userData.raidsToSelect.push(firstSelectedRaid);
+    
+    const remainingRaids = availableRaids.filter(r => r !== firstSelectedRaid);
+  
+    const raidOptions = remainingRaids.map(raid => ({
+        label: raid,
+        value: raid
+    }));
+    
+    const embed = new EmbedBuilder()
+      .setTitle('他にも希望するレイドはありますか？')
+      .setDescription(`最初に **${firstSelectedRaid}** を選択しました。\n他にも希望するレイドがあれば選択してください（複数可）。\nなければ「選択を完了」ボタンを押してください。`)
+      .setColor('#2ECC71');
+  
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`multi_raid_select_${recruitmentId}`)
+      .setPlaceholder('追加で希望するレイドを選択')
+      .addOptions(raidOptions)
+      .setMinValues(0)
+      .setMaxValues(raidOptions.length);
+      
+    const row1 = new ActionRowBuilder().addComponents(menu);
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`multi_raid_confirm_${recruitmentId}`)
+        .setLabel('選択を完了して属性入力へ進む')
+        .setStyle(ButtonStyle.Success)
+    );
+  
+    await interaction.update({ embeds: [embed], components: [row1, row2] });
+}
+  
+// ★★★ 新規追加: レイドごとの属性選択プロセスを開始する関数 ★★★
+async function startAttributeSelectionForRaids(interaction, recruitmentId) {
+    const userData = tempUserData.get(interaction.user.id);
+    if (!userData || userData.raidsToSelect.length === 0) {
+        return interaction.update({ content: 'エラー: 希望レイドが選択されていません。', embeds: [], components: [] });
+    }
+    await showNextAttributeSelection(interaction, recruitmentId);
+}
+
+// ★★★ 新規追加: 次のレイドの属性選択UIを表示する関数 ★★★
+async function showNextAttributeSelection(interaction, recruitmentId) {
+    const userData = tempUserData.get(interaction.user.id);
+    const { selectionIndex, raidsToSelect } = userData;
+
+    if (selectionIndex >= raidsToSelect.length) {
+        // 全て完了したので、時間選択に進む
+        await showTimeAvailabilitySelection(interaction, recruitmentId, 'multi_raid_completed', []);
+        return;
+    }
+
+    const currentRaid = raidsToSelect[selectionIndex];
+    const attributeOptions = [
+        { label: '全属性', value: 'all_attributes', description: 'すべての属性で参加可能です' },
+        ...attributes.map(attr => ({ label: attr, value: attr }))
+    ];
+
+    const embed = new EmbedBuilder()
+        .setTitle(`【${selectionIndex + 1}/${raidsToSelect.length}】 ${currentRaid} の希望属性`)
+        .setDescription(`**${currentRaid}** で担当可能な属性をすべて選択してください。`)
+        .setColor('#2ECC71');
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId(`attribute_select_per_raid_${recruitmentId}`)
+        .setPlaceholder('担当可能な属性を選択 (複数可)')
+        .addOptions(attributeOptions)
+        .setMinValues(1)
+        .setMaxValues(attributeOptions.length);
+
+    await interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+}
+
+
   // 参加可能時間選択UI表示
   async function showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes) {
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
     
-    // ★★★ ご要望に応じて時間選択肢を19時～23時に変更 ★★★
     const timeSelectOptions = [ { label: '今すぐ参加可能', value: 'now', description: '募集開始時刻に関わらず参加' } ];
     for (let i = 19; i <= 23; i++) { 
         const hour = i.toString().padStart(2, '0'); 
         timeSelectOptions.push({ label: `${hour}:00 以降参加可能`, value: `${hour}:00` }); 
     }
     
-    // ★★★ CustomIDの100文字制限対策 ★★★
-    // 選択された属性は一時データに保存する
-    tempUserData.set(interaction.user.id, { 
-        recruitmentId, 
-        joinType, 
-        attributes: selectedAttributes,
-        timeAvailability: null, 
-        remarks: null 
-    });
+    // ★★★ 一時データへの保存ロジックを修正 ★★★
+    const currentUserData = tempUserData.get(interaction.user.id) || {};
+    if (joinType === 'multi_raid_completed') {
+        tempUserData.set(interaction.user.id, {
+            ...currentUserData,
+            recruitmentId,
+        });
+    } else {
+        const attributesByRaid = {};
+        if (joinType === 'なんでも可') {
+            const availableRaids = raidTypes.filter(type => type !== '参加者希望');
+            availableRaids.forEach(raid => {
+                attributesByRaid[raid] = selectedAttributes;
+            });
+        } else {
+            attributesByRaid[joinType] = selectedAttributes;
+        }
+        tempUserData.set(interaction.user.id, {
+            ...currentUserData,
+            recruitmentId,
+            joinType: joinType,
+            attributesByRaid: attributesByRaid,
+        });
+    }
 
-    // CustomIDをシンプルにする
     const customId = `time_availability_select_${recruitmentId}`;
-    
     const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(customId).setPlaceholder('参加可能な最も早い時間を選択').addOptions(timeSelectOptions));
-    const embed = new EmbedBuilder().setTitle('⏰ 参加可能時間の選択').setDescription(`参加タイプ: **${joinType}**\n選択属性: **${selectedAttributes.join(', ')}**\n\n参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`).setColor('#2ECC71');
+    const embed = new EmbedBuilder().setTitle('⏰ 参加可能時間の選択').setDescription(`参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`).setColor('#2ECC71');
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
   }
   
   // 参加確認UI表示 (備考入力ボタン付き)
   async function showJoinConfirmation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability) {
-    // debugLog('JoinConfirm', `参加確認UI表示: ${recruitmentId}, Type: ${joinType}, Attr: [${selectedAttributes.join(',')}], Time: ${timeAvailability}, User: ${interaction.user.tag}`);
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Join Confirm Update Error:", e) });
+    
+    // ★★★ userData の取得と表示を修正 ★★★
     const currentData = tempUserData.get(interaction.user.id) || {};
-    tempUserData.set(interaction.user.id, { ...currentData, recruitmentId, joinType, attributes: selectedAttributes, timeAvailability: timeAvailability, remarks: currentData.remarks || '' });
+    tempUserData.set(interaction.user.id, { ...currentData, timeAvailability: timeAvailability, remarks: currentData.remarks || '' });
+    
+    const userData = tempUserData.get(interaction.user.id);
+    const finalJoinType = userData.joinType;
+    const finalAttributesByRaid = userData.attributesByRaid;
+
     const embed = new EmbedBuilder().setTitle('✅ 参加申込内容 確認').setDescription('以下の内容で参加を申し込みます。よろしければ下のボタンを押してください。').setColor('#2ECC71')
-      .addFields( { name: '募集', value: `${recruitment.type} (${recruitment.date} ${recruitment.time})`, inline: false }, { name: '参加タイプ', value: joinType, inline: true }, { name: '担当可能属性', value: selectedAttributes.join(', '), inline: true }, { name: '参加可能時間', value: timeAvailability, inline: true })
-      .setFooter({text: '備考は「備考入力～」、なければ「参加確定(備考なし)」を'});
+      .addFields( 
+          { name: '募集', value: `${recruitment.type} (${recruitment.date} ${recruitment.time})`, inline: false }, 
+          { name: '参加タイプ', value: finalJoinType, inline: true }, 
+          { name: '参加可能時間', value: timeAvailability, inline: true }
+      );
+    
+    let attrDescription = Object.entries(finalAttributesByRaid)
+        .map(([raid, attrs]) => `**${raid}**: ${attrs.join(', ')}`)
+        .join('\n');
+    if(attrDescription.length > 1024) attrDescription = attrDescription.substring(0, 1021) + '...';
+    if(attrDescription) {
+        embed.addFields({ name: '担当可能属性', value: attrDescription, inline: false });
+    }
+
+    embed.setFooter({text: '備考は「備考入力～」、なければ「参加確定(備考なし)」を'});
      const openRemarksModalBtnId = `open_remarks_modal_${recruitmentId}`;
      const confirmDirectlyBtnId = `confirm_direct_${recruitmentId}`;
      const row = new ActionRowBuilder().addComponents( new ButtonBuilder().setCustomId(openRemarksModalBtnId).setLabel('備考入力して参加確定').setStyle(ButtonStyle.Primary).setEmoji('📝'), new ButtonBuilder().setCustomId(confirmDirectlyBtnId).setLabel('参加確定 (備考なし)').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('cancel_join').setLabel('キャンセル').setStyle(ButtonStyle.Danger));
@@ -923,8 +1111,8 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   }
   
   
-// ★★★【最重要】ご要望に応じて名前表示バグを修正した関数 ★★★
-async function confirmParticipation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability, remarks = '') {
+// ★★★【重要】参加者データ構造を修正した関数 ★★★
+async function confirmParticipation(interaction, recruitmentId, joinType, attributesByRaid, timeAvailability, remarks = '') {
     debugLog('ConfirmParticipation', `参加確定処理: ${recruitmentId}, User: ${interaction.user.tag}`);
   
     const recruitment = activeRecruitments.get(recruitmentId);
@@ -942,34 +1130,29 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
         let member = interaction.member;
         const user = interaction.user;
 
-        // 1. メンバー情報が不完全なら、サーバーから再取得を試みる
         if (interaction.guild && (!member || !member.displayName)) {
             console.log(`[User Info] Member data for ${user.id} might be incomplete. Fetching from guild...`);
             try {
                 member = await interaction.guild.members.fetch(user.id);
             } catch (fetchError) {
                 console.error(`[User Info] Failed to fetch member ${user.id}:`, fetchError);
-                // 取得失敗しても、ユーザー名で続行する
             }
         }
 
-        // 2. 表示・保存する名前を決定する（ニックネーム優先）
         const usernameToSave = member?.displayName || user.username;
         console.log(`[User Info] User: ${user.username}, Determined display name: ${usernameToSave}`);
 
-        // 3. 決定した名前を使って参加者データを作成する
         const participantData = {
             userId: user.id,
-            username: usernameToSave, // ← 正しい名前をセット！
+            username: usernameToSave,
             joinType: joinType,
-            attributes: selectedAttributes,
+            attributesByRaid: attributesByRaid, // ← 新しいデータ構造
             timeAvailability: timeAvailability,
             remarks: remarks || '',
             assignedAttribute: null,
             isTestParticipant: false
         };
 
-        // 4. 参加者リストに追加または更新する
         const existingIndex = recruitment.participants.findIndex(p => p.userId === user.id);
         if (existingIndex >= 0) {
             recruitment.participants[existingIndex] = participantData;
@@ -982,13 +1165,17 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
     } catch (error) {
         console.error(`Error during confirmParticipation for user ${interaction.user.id}:`, error);
         await handleErrorReply(interaction, error, '参加情報の登録中にサーバーエラーが発生しました。');
-        return; // エラーが発生したらここで処理を終了
+        return;
     }
     
     await updateRecruitmentMessage(recruitment);
     
+    let replyContent = '✅ 参加申込が完了しました！\n';
+    let attrText = Object.entries(attributesByRaid).map(([raid, attrs]) => `${raid}: ${attrs.join('/')}`).join(', ');
+    replyContent += `タイプ: ${joinType}, 属性: ${attrText}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : '');
+
     const replyOptions = {
-        content: '✅ 参加申込が完了しました！\n' + `タイプ: ${joinType}, 属性: ${selectedAttributes.join('/')}, 時間: ${timeAvailability}` + (remarks ? `\n📝 備考: ${remarks}` : ''),
+        content: replyContent,
         embeds: [], components: [], ephemeral: true
     };
     try {
@@ -1003,7 +1190,6 @@ async function confirmParticipation(interaction, recruitmentId, joinType, select
         try { await interaction.channel.send({ content: `<@${interaction.user.id}> 参加申込は処理されましたが、完了メッセージの表示に失敗しました。(${error.code || '詳細不明'})` }).catch(() => {}); } catch {}
     }
 
-   
     saveRecruitmentData();
 }
 
@@ -1140,8 +1326,18 @@ saveRecruitmentData();
       if (recruitment.status === 'active' && recruitment.participants.length > 0) {
         description += '**【現在の参加表明者】**\n';
         recruitment.participants.forEach(p => {
-          description += `- <@${p.userId}> [${p.joinType}] ${p.attributes.join('/')} (${p.timeAvailability})`;
-          // ★★★ ご要望に応じて備考を全文表示に修正 ★★★
+          // ★★★ 表示方法を修正 ★★★
+          let attrText = '';
+          if (p.joinType === 'なんでも可' && p.attributesByRaid) {
+              const firstKey = Object.keys(p.attributesByRaid)[0];
+              if(firstKey) attrText = `[${p.attributesByRaid[firstKey].join('/')}]`;
+          } else if (p.attributesByRaid) {
+              attrText = `[${Object.keys(p.attributesByRaid).join('/')}]`;
+          } else if (p.attributes) { // 古いデータ形式のためのフォールバック
+              attrText = `[${p.attributes.join('/')}]`
+          }
+
+          description += `- <@${p.userId}> ${p.joinType} ${attrText} (${p.timeAvailability})`;
           if (p.remarks) description += ` *備考: ${p.remarks}*`;
           description += '\n';
         });
@@ -1163,7 +1359,13 @@ saveRecruitmentData();
           if (assignedParticipant) value = `<@${assignedParticipant.userId}>${assignedParticipant.remarks ? ' 📝' : ''}`;
           else value = '空き';
         } else if (recruitment.status === 'active') {
-          const hopefuls = recruitment.participants.filter(p => p.attributes.includes(attr));
+          // ★★★ 希望者カウントのロジックを修正 ★★★
+          const hopefuls = recruitment.participants.filter(p => {
+              if (!p.attributesByRaid) { // 古いデータ形式のフォールバック
+                return p.attributes && p.attributes.includes(attr);
+              }
+              return Object.values(p.attributesByRaid).some(attrs => attrs.includes(attr));
+          });
           if (hopefuls.length > 0) value = hopefuls.length <= 2 ? hopefuls.map(p => `<@${p.userId}>`).join('\n') : `${hopefuls.length}名`;
           else value = '－';
         }
@@ -1199,55 +1401,56 @@ saveRecruitmentData();
   
        let finalRaidType = recruitment.type;
     if (recruitment.type === '参加者希望') {
-      // ★★★ ここから新しい多数決ロジック ★★★
       const votes = {};
       const availableRaids = raidTypes.filter(type => type !== '参加者希望');
-      availableRaids.forEach(raid => { votes[raid] = 0; }); // 例: { '天元': 0, 'ルシゼロ': 0, 'スパバハ': 0 }
+      availableRaids.forEach(raid => { votes[raid] = 0; });
 
       recruitment.participants.forEach(p => {
         if (p.joinType === 'なんでも可') {
-          // 「なんでも可」は全レイドに0.5票ずつ加算
           availableRaids.forEach(raid => { votes[raid] += 0.5; });
-        } else if (votes.hasOwnProperty(p.joinType)) {
-          // 特定のレイドへの投票はそのレイドに1票加算
-          votes[p.joinType] += 1;
+        } else if (p.attributesByRaid) {
+            Object.keys(p.attributesByRaid).forEach(raidKey => {
+                if (votes.hasOwnProperty(raidKey)) {
+                    votes[raidKey] += 1 / Object.keys(p.attributesByRaid).length; // 複数希望の場合は票を分割
+                }
+            })
         }
       });
 
-      // 最も票数の多いレイドを選ぶ
       let maxVotes = -1;
       let winningRaids = [];
-
       for (const raid in votes) {
         if (votes[raid] > maxVotes) {
           maxVotes = votes[raid];
-          winningRaids = [raid]; // 新しい最大値なので、リストをリセット
+          winningRaids = [raid];
         } else if (votes[raid] === maxVotes) {
-          winningRaids.push(raid); // 同票なのでリストに追加
+          winningRaids.push(raid);
         }
       }
 
-      // 票が1つも入っていない場合（参加者0など）は、デフォルトで最初のレイドタイプにする
       if (maxVotes <= 0) {
         finalRaidType = availableRaids[0] || recruitment.type;
       } else {
-        // 同票のレイドがある場合は、その中からランダムで1つ選ぶ（または最初のものを選ぶ）
-        finalRaidType = winningRaids[0]; // ここでは安定して最初のものを選ぶ
+        finalRaidType = winningRaids[0];
       }
       
-      const voteLog = Object.entries(votes).map(([k, v]) => `${k}: ${v}`).join(', ');
+      const voteLog = Object.entries(votes).map(([k, v]) => `${k}: ${v.toFixed(2)}`).join(', ');
       debugLog('AutoAssign', `決定レイドタイプ: ${finalRaidType} (投票結果: ${voteLog})`);
-      // ★★★ 新しい多数決ロジックここまで ★★★
     }
     recruitment.finalRaidType = finalRaidType;
   
+   // ★★★ 割り振り対象者と属性の選定ロジックを修正 ★★★
    const eligibleParticipants = recruitment.participants.filter(p => {
-        // ★★★ ここから修正 ★★★
-        // 最終決定したレイドタイプに参加希望を出しているか、
-        // または「なんでも可」で希望を出している参加者を抽出する
-        return p.joinType === finalRaidType || p.joinType === 'なんでも可';
-        // ★★★ ここまで修正 ★★★
-    }).map(p => ({ ...p, originalAttributes: p.attributes, assignedAttribute: null })); // 元の属性を保持
+        if (p.joinType === 'なんでも可') return true;
+        if (p.attributesByRaid && p.attributesByRaid[finalRaidType]) return true;
+        return false;
+    }).map(p => {
+        const targetAttributes = (p.joinType === 'なんでも可' && p.attributesByRaid)
+            ? (Object.values(p.attributesByRaid)[0] || [])
+            : (p.attributesByRaid ? p.attributesByRaid[finalRaidType] : p.attributes) || [];
+        
+        return { ...p, attributes: targetAttributes, originalAttributes: targetAttributes, assignedAttribute: null };
+    });
   
     debugLog('AutoAssign', `割り振り対象者数: ${eligibleParticipants.length}名 (タイプ: ${finalRaidType})`);
     if (eligibleParticipants.length === 0) {
@@ -1356,7 +1559,6 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
                 if (p) {
                     participantText = `<@${p.userId}>`;
                     if (p.remarks && p.remarks.trim() !== '') {
-                        // ★★★ ご要望に応じて備考を全文表示に修正 ★★★
                         participantText += ` (📝 ${p.remarks})`;
                     }
                 }
@@ -1371,7 +1573,6 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
                       assignedText = assignedText.substring(0, 1950) + '... (メッセージ省略)';
                   }
 
-                  // ★★★ ご要望に応じてテストユーザーを除外するフィルターを追加 ★★★
                 const realUserIdsToMention = assignedP
                     .map(p => p.userId)
                     .filter(userId => /^\d+$/.test(userId));
@@ -1457,7 +1658,7 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
       .addFields(
         { name: '🌟 基本コマンド', value: '`!募集` - 新規募集開始\n`!募集リスト` - アクティブ募集一覧\n`!募集ヘルプ` - このヘルプ\n`!IDリスト` - 全募集IDと状態' },
         { name: '⚙️ 募集の流れ', value: '1. `!募集`\n2. ボタンでレイドタイプ、日付、時間を選択\n3. 確認画面で「確定」→ 募集メッセージ投稿' },
-        { name: '🎮 参加の流れ', value: '1. 募集メッセージの「参加申込」\n2. （参加者希望の場合）コンテンツ選択\n3. 担当可能属性を複数選択\n4. 参加可能時間を選択\n5. 確認画面で「備考入力して参加確定」or「参加確定(備考なし)」\n6. （備考入力の場合）モーダルに入力して送信' },
+        { name: '🎮 参加の流れ', value: '1. 募集メッセージの「参加申込」\n2. （参加者希望の場合）希望コンテンツを1つ以上選択\n3. 選択したコンテンツごとに担当可能属性を選択（「全属性」も選択可）\n4. 参加可能時間を選択\n5. 確認画面で「備考入力して参加確定」or「参加確定(備考なし)」\n6. （備考入力の場合）モーダルに入力して送信' },
          { name: '👥 割り振りと締切', value: '- 参加者が**7名**に達すると、自動的に属性割り振りの**プレビュー**が行われます。\n- 募集メッセージの担当者表示はプレビュー結果です。\n- 開催日当日の**朝8時**に自動的に締め切られ、最終的な割り振りが行われます。\n- 募集者は「募集締め切り」ボタンで手動締め切りも可能です。\n- 最終割り振り結果は締切時に通知され、**6属性分が埋まらなかったり、参加者が溢れた場合は未割り当て**となります。'},
          { name: '🔧 管理者用コマンド', value: '`!募集削除 [ID]`\n`!テストモード開始/終了`\n`!テスト参加者追加 [ID] [人数]` (`!testadd`)\n`!追加 [ID]` (3名追加)\n`!直接テスト [ID] (人数)` (`!directtest`)\n`!募集確認 [ID]` (詳細デバッグ)\n`!募集詳細確認` (全概要デバッグ)\n`!再起動テスト`' }
       ).setFooter({ text: '不明点は管理者へ' });
@@ -1475,7 +1676,7 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
      let participantsInfo = '**参加者情報:**\n';
      if (recruitment.participants.length > 0) {
          participantsInfo += '```json\n';
-         participantsInfo += JSON.stringify(recruitment.participants.map(p => ({ u: p.username, id: p.userId, type: p.joinType, attr: p.attributes, time: p.timeAvailability, assigned: p.assignedAttribute||'-', rmk: p.remarks||'', test: p.isTestParticipant||false })), null, 2);
+         participantsInfo += JSON.stringify(recruitment.participants.map(p => ({ u: p.username, id: p.userId, type: p.joinType, attr: p.attributesByRaid || p.attributes, time: p.timeAvailability, assigned: p.assignedAttribute||'-', rmk: p.remarks||'', test: p.isTestParticipant||false })), null, 2);
          participantsInfo += '\n```';
      } else participantsInfo += '参加者なし';
      const combined = details + '\n' + participantsInfo;
@@ -1583,8 +1784,33 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
     for (let i = 0; i < count; i++) {
       const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
       const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
-      let joinType; if (recruitment.type === '参加者希望') { const types = ['天元', 'ルシゼロ', 'なんでも可']; joinType = types[Math.floor(Math.random() * types.length)]; } else { joinType = recruitment.type; }
-      const testParticipant = { userId: testUserId, username: testUsername, joinType: joinType, attributes: getRandomAttributes(), timeAvailability: getRandomTimeAvailability(), remarks: '', assignedAttribute: null, isTestParticipant: true };
+      let joinType, attributesByRaid = {};
+      
+      if (recruitment.type === '参加者希望') { 
+          const types = ['天元', 'ルシゼロ', 'なんでも可']; 
+          joinType = types[Math.floor(Math.random() * types.length)];
+          const availableRaids = raidTypes.filter(t => t !== '参加者希望');
+          if(joinType === 'なんでも可') {
+              const attrs = getRandomAttributes();
+              availableRaids.forEach(r => attributesByRaid[r] = attrs);
+          } else {
+              attributesByRaid[joinType] = getRandomAttributes();
+          }
+      } else { 
+          joinType = recruitment.type; 
+          attributesByRaid[joinType] = getRandomAttributes();
+      }
+
+      const testParticipant = { 
+          userId: testUserId, 
+          username: testUsername, 
+          joinType: joinType, 
+          attributesByRaid: attributesByRaid,
+          timeAvailability: getRandomTimeAvailability(), 
+          remarks: '', 
+          assignedAttribute: null, 
+          isTestParticipant: true 
+      };
       recruitment.participants.push(testParticipant);
       testMode.testParticipants.push(testParticipant);
       addedParticipants.push(testParticipant);
@@ -1593,7 +1819,10 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
     try {
       await updateRecruitmentMessage(recruitment);
       const embed = new EmbedBuilder().setTitle('🧪 テスト参加者 追加完了').setDescription(`募集ID: \`${recruitmentId}\` に ${addedParticipants.length} 名のテスト参加者を追加しました。\n現在の参加者数: ${recruitment.participants.length} 名`).setColor('#2196F3').setTimestamp();
-      addedParticipants.slice(0, 5).forEach((p, index) => embed.addFields({ name: `${index + 1}. ${p.username}`, value: `Type:${p.joinType}, Attr:${p.attributes.join('/')}, Time:${p.timeAvailability}`, inline: false }));
+      addedParticipants.slice(0, 5).forEach((p, index) => {
+          const attrText = Object.entries(p.attributesByRaid).map(([r, a]) => `${r}:${a.join('/')}`).join(' ');
+          embed.addFields({ name: `${index + 1}. ${p.username}`, value: `Type:${p.joinType}, Attr:${attrText}, Time:${p.timeAvailability}`, inline: false });
+      });
        if (addedParticipants.length > 5) embed.addFields({ name: '...', value: `他 ${addedParticipants.length - 5} 名`, inline: false });
       await message.reply({ embeds: [embed] });
   
@@ -1623,7 +1852,7 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
     const currentCount = recruitment.participants.length;
   
      const options = [];
-     [1, 3, 5, 7, 10].forEach(num => {
+    .forEach(num => {
          options.push({
              label: `${num}人 追加`,
              value: String(num),
@@ -1655,10 +1884,35 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
   
     const addedParticipants = [];
     for (let i = 0; i < count; i++) {
-      const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
-      const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
-      let joinType; if (recruitment.type === '参加者希望') { const types = ['天元', 'ルシゼロ', 'なんでも可']; joinType = types[Math.floor(Math.random() * types.length)]; } else { joinType = recruitment.type; }
-      const testParticipant = { userId: testUserId, username: testUsername, joinType: joinType, attributes: getRandomAttributes(), timeAvailability: getRandomTimeAvailability(), remarks: '', assignedAttribute: null, isTestParticipant: true };
+        const testUserId = `test-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 5)}`;
+        const testUsername = generateTestParticipantName(recruitment.participants.length + i + 1);
+        let joinType, attributesByRaid = {};
+        
+        if (recruitment.type === '参加者希望') { 
+            const types = ['天元', 'ルシゼロ', 'なんでも可']; 
+            joinType = types[Math.floor(Math.random() * types.length)];
+            const availableRaids = raidTypes.filter(t => t !== '参加者希望');
+            if(joinType === 'なんでも可') {
+                const attrs = getRandomAttributes();
+                availableRaids.forEach(r => attributesByRaid[r] = attrs);
+            } else {
+                attributesByRaid[joinType] = getRandomAttributes();
+            }
+        } else { 
+            joinType = recruitment.type; 
+            attributesByRaid[joinType] = getRandomAttributes();
+        }
+  
+        const testParticipant = { 
+            userId: testUserId, 
+            username: testUsername, 
+            joinType: joinType, 
+            attributesByRaid: attributesByRaid,
+            timeAvailability: getRandomTimeAvailability(), 
+            remarks: '', 
+            assignedAttribute: null, 
+            isTestParticipant: true 
+        };
       recruitment.participants.push(testParticipant);
       testMode.testParticipants.push(testParticipant);
       addedParticipants.push(testParticipant);
