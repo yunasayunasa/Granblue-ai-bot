@@ -635,7 +635,6 @@ async function handleSelectMenuInteraction(interaction) {
       const recruitmentId = customId.replace('join_type_', '');
       const selectedValues = interaction.values;
       
-      // ★★★ ここから修正 ★★★
       const recruitment = activeRecruitments.get(recruitmentId);
       if (!recruitment || recruitment.status !== 'active') {
           return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] });
@@ -660,20 +659,9 @@ async function handleSelectMenuInteraction(interaction) {
       }
 
       await startAttributeSelectionForRaids(interaction, recruitmentId);
-      // ★★★ ここまで修正 ★★★
     }
-    // 属性選択 (通常フロー用)
-    else if (customId.startsWith('attribute_select_')) {
-      const parts = customId.split('_');
-       if (parts.length < 4) throw new Error(`不正な属性選択ID: ${customId}`);
-      const recruitmentId = parts[2];
-      const joinType = parts[3];
-      let selectedAttributes = interaction.values;
-      if (selectedAttributes.includes('all_attributes')) {
-          selectedAttributes = [...attributes];
-      }
-      await showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes);
-    }
+    // ★★★ 廃止: attribute_select_ (単一フロー用) は不要になったため削除 ★★★
+
     // 時間選択 (参加フローの最終段階)
     else if (customId.startsWith('time_availability_select_')) {
       const recruitmentId = customId.replace('time_availability_select_', '');
@@ -692,7 +680,7 @@ async function handleSelectMenuInteraction(interaction) {
         if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${interaction.values[0]}`);
        await showTestParticipantConfirmation(interaction, recruitmentId, count);
     }
-    // レイドごとの属性選択メニュー
+    // レイドごとの属性選択メニュー (★すべてのフローがここに統合される★)
     else if (customId.startsWith('attribute_select_per_raid_')) {
         const recruitmentId = customId.replace('attribute_select_per_raid_', '');
         const userData = tempUserData.get(interaction.user.id);
@@ -917,24 +905,20 @@ async function showJoinOptions(interaction, recruitmentId) {
   const embed = new EmbedBuilder().setTitle('🎮 参加申込').setDescription(embedDescription).setColor('#2ECC71');
   await interaction.reply({ embeds: [embed], components: components, ephemeral: true });
 }
-
-
-  
-// ★★★ 新規追加: レイドごとの属性選択プロセスを開始する関数 ★★★
+// レイドごとの属性選択プロセスを開始する関数
 async function startAttributeSelectionForRaids(interaction, recruitmentId) {
     const userData = tempUserData.get(interaction.user.id);
     if (!userData || userData.raidsToSelect.length === 0) {
         return interaction.update({ content: 'エラー: 希望レイドが選択されていません。', embeds: [], components: [] });
     }
+    // 最初のレイドの属性選択画面を呼び出す
     await showNextAttributeSelection(interaction, recruitmentId);
 }
 
 // 次のレイドの属性選択UIを表示する関数
 async function showNextAttributeSelection(interaction, recruitmentId) {
-    // ★★★ ここから追加 ★★★
     const recruitment = activeRecruitments.get(recruitmentId);
     if (!recruitment || recruitment.status !== 'active') {
-        // interactionがupdate可能かチェック
         if (!interaction.replied && !interaction.deferred) {
             await interaction.reply({ content: 'この募集は処理中に締め切られました。', ephemeral: true });
         } else {
@@ -942,13 +926,13 @@ async function showNextAttributeSelection(interaction, recruitmentId) {
         }
         return;
     }
-    // ★★★ ここまで追加 ★★★
 
     const userData = tempUserData.get(interaction.user.id);
     const { selectionIndex, raidsToSelect } = userData;
 
     if (selectionIndex >= raidsToSelect.length) {
-        await showTimeAvailabilitySelection(interaction, recruitmentId, 'multi_raid_completed', []);
+        // 全ての属性選択が完了したので、時間選択に進む
+        await showTimeAvailabilitySelection(interaction, recruitmentId);
         return;
     }
 
@@ -970,7 +954,6 @@ async function showNextAttributeSelection(interaction, recruitmentId) {
         .setMinValues(1)
         .setMaxValues(attributeOptions.length);
 
-    // interactionがupdate可能かチェック
     if (!interaction.replied && !interaction.deferred) {
        await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)], ephemeral: true });
     } else {
@@ -980,9 +963,20 @@ async function showNextAttributeSelection(interaction, recruitmentId) {
 
 
   // 参加可能時間選択UI表示
-  async function showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes) {
+async function showTimeAvailabilitySelection(interaction, recruitmentId) {
     const recruitment = activeRecruitments.get(recruitmentId);
-    if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
+    if (!recruitment || recruitment.status !== 'active') {
+        return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
+    }
+    
+    // ★★★ 不要な引数を削除し、tempUserData を正として処理 ★★★
+    const userData = tempUserData.get(interaction.user.id);
+    if (!userData) {
+        throw new Error('時間選択プロセスでユーザーデータが見つかりません。');
+    }
+    // recruitmentId を念のため更新
+    userData.recruitmentId = recruitmentId;
+    tempUserData.set(interaction.user.id, userData);
     
     const timeSelectOptions = [ { label: '今すぐ参加可能', value: 'now', description: '募集開始時刻に関わらず参加' } ];
     for (let i = 19; i <= 23; i++) { 
@@ -990,36 +984,19 @@ async function showNextAttributeSelection(interaction, recruitmentId) {
         timeSelectOptions.push({ label: `${hour}:00 以降参加可能`, value: `${hour}:00` }); 
     }
     
-    // ★★★ 一時データへの保存ロジックを修正 ★★★
-    const currentUserData = tempUserData.get(interaction.user.id) || {};
-    if (joinType === 'multi_raid_completed') {
-        tempUserData.set(interaction.user.id, {
-            ...currentUserData,
-            recruitmentId,
-        });
-    } else {
-        const attributesByRaid = {};
-        if (joinType === 'なんでも可') {
-            const availableRaids = raidTypes.filter(type => type !== '参加者希望');
-            availableRaids.forEach(raid => {
-                attributesByRaid[raid] = selectedAttributes;
-            });
-        } else {
-            attributesByRaid[joinType] = selectedAttributes;
-        }
-        tempUserData.set(interaction.user.id, {
-            ...currentUserData,
-            recruitmentId,
-            joinType: joinType,
-            attributesByRaid: attributesByRaid,
-        });
-    }
+    let descriptionText = `選択した希望レイド:\n`;
+    descriptionText += Object.keys(userData.attributesByRaid).map(raid => `- ${raid}`).join('\n');
+    descriptionText += `\n\n参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`;
 
     const customId = `time_availability_select_${recruitmentId}`;
     const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(customId).setPlaceholder('参加可能な最も早い時間を選択').addOptions(timeSelectOptions));
-    const embed = new EmbedBuilder().setTitle('⏰ 参加可能時間の選択').setDescription(`参加可能な最も早い時間を選択してください。(募集開始: ${recruitment.time})`).setColor('#2ECC71');
+    const embed = new EmbedBuilder()
+        .setTitle('⏰ 参加可能時間の選択')
+        .setDescription(descriptionText)
+        .setColor('#2ECC71');
+
     await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Time Select Update Error:", e) });
-  }
+}
   
   // 参加確認UI表示 (備考入力ボタン付き)
   async function showJoinConfirmation(interaction, recruitmentId, joinType, selectedAttributes, timeAvailability) {
