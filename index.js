@@ -418,110 +418,103 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   });
   
   // ボタンインタラクション処理関数
-  async function handleButtonInteraction(interaction) {
-    const customId = interaction.customId;
-    // 頻繁なログは抑制しても良い
-    // console.log(`ボタン処理開始: ${customId}, User: ${interaction.user.tag}`);
-  
-    try {
-      // レイドタイプ選択
-      if (customId.startsWith('raid_type_')) {
-          const raidType = customId.replace('raid_type_', '');
-          await showDateSelection(interaction, raidType);
+async function handleButtonInteraction(interaction) {
+  const customId = interaction.customId;
+  // 頻繁なログは抑制しても良い
+  // console.log(`ボタン処理開始: ${customId}, User: ${interaction.user.tag}`);
+
+  try {
+    // レイドタイプ選択
+    if (customId.startsWith('raid_type_')) {
+        const raidType = customId.replace('raid_type_', '');
+        await showDateSelection(interaction, raidType);
+    }
+    // 日付選択
+    else if (customId.startsWith('date_select_')) {
+        const parts = customId.split('_');
+        if (parts.length < 4) throw new Error(`不正な日付選択ID: ${customId}`);
+        const raidType = parts[2];
+        const dateStr = parts[3];
+        await showTimeSelection(interaction, raidType, dateStr);
+    }
+    // 募集確定ボタン
+    else if (customId.startsWith('confirm_recruitment_')) {
+        const recruitmentId = customId.replace('confirm_recruitment_', '');
+        await finalizeRecruitment(interaction, recruitmentId);
+    }
+    // 募集キャンセルボタン (作成時)
+    else if (customId === 'cancel_recruitment') {
+        await interaction.update({ content: '募集作成をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Recruitment Update Error:", e) });
+    }
+    // 参加申込ボタン
+    else if (customId.startsWith('join_recruitment_')) {
+        const recruitmentId = customId.replace('join_recruitment_', '');
+        await showJoinOptions(interaction, recruitmentId);
+    }
+    // 参加キャンセルボタン (参加後)
+    else if (customId.startsWith('cancel_participation_')) {
+        const recruitmentId = customId.replace('cancel_participation_', '');
+        await cancelParticipation(interaction, recruitmentId);
+    }
+    // 募集締め切りボタン
+    else if (customId.startsWith('close_recruitment_')) {
+        const recruitmentId = customId.replace('close_recruitment_', '');
+        await closeRecruitment(interaction, recruitmentId);
+    }
+    // 備考入力モーダルを開くボタン
+    else if (customId.startsWith('open_remarks_modal_')) {
+        const recruitmentId = customId.replace('open_remarks_modal_', '');
+        await showRemarksModal(interaction, recruitmentId);
+    }
+    // 参加確定ボタン (備考なし)
+    else if (customId.startsWith('confirm_direct_')) {
+      const recruitmentId = customId.replace('confirm_direct_', '');
+      const userData = tempUserData.get(interaction.user.id);
+      if (!userData || userData.recruitmentId !== recruitmentId) {
+         return await interaction.update({ content: 'エラー: 参加情報が見つからないか古くなっています。再度申込してください。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Confirm Direct Update Error:", e) });
       }
-      // 日付選択
-      else if (customId.startsWith('date_select_')) {
-          const parts = customId.split('_');
-          if (parts.length < 4) throw new Error(`不正な日付選択ID: ${customId}`);
-          const raidType = parts[2];
-          const dateStr = parts[3];
-          await showTimeSelection(interaction, raidType, dateStr);
-      }
-      // 募集確定ボタン
-      else if (customId.startsWith('confirm_recruitment_')) {
-          const recruitmentId = customId.replace('confirm_recruitment_', '');
-          await finalizeRecruitment(interaction, recruitmentId);
-      }
-      // 募集キャンセルボタン (作成時)
-      else if (customId === 'cancel_recruitment') {
-          await interaction.update({ content: '募集作成をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Recruitment Update Error:", e) });
-      }
-      // 参加申込ボタン
-      else if (customId.startsWith('join_recruitment_')) {
-          const recruitmentId = customId.replace('join_recruitment_', '');
-          await showJoinOptions(interaction, recruitmentId);
-      }
-      // 参加キャンセルボタン (参加後)
-      else if (customId.startsWith('cancel_participation_')) {
-          const recruitmentId = customId.replace('cancel_participation_', '');
-          await cancelParticipation(interaction, recruitmentId);
-      }
-      // 募集締め切りボタン
-      else if (customId.startsWith('close_recruitment_')) {
-          const recruitmentId = customId.replace('close_recruitment_', '');
-          await closeRecruitment(interaction, recruitmentId);
-      }
-      // 備考入力モーダルを開くボタン
-      else if (customId.startsWith('open_remarks_modal_')) {
-          const recruitmentId = customId.replace('open_remarks_modal_', '');
-          await showRemarksModal(interaction, recruitmentId);
-      }
-      // 参加確定ボタン (備考なし)
-      else if (customId.startsWith('confirm_direct_')) {
-        const recruitmentId = customId.replace('confirm_direct_', '');
-        const userData = tempUserData.get(interaction.user.id);
-        if (!userData || userData.recruitmentId !== recruitmentId) {
-           return await interaction.update({ content: 'エラー: 参加情報が見つからないか古くなっています。再度申込してください。', embeds: [], components: [], ephemeral: true }).catch(e => { if(e.code !== 10062) console.error("Confirm Direct Update Error:", e) });
-        }
-        await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, '');
+      await confirmParticipation(interaction, recruitmentId, userData.joinType, userData.attributesByRaid, userData.timeAvailability, '');
+      tempUserData.delete(interaction.user.id);
+    }
+    // 参加申込キャンセルボタン (参加フロー中)
+    else if (customId === 'cancel_join') {
         tempUserData.delete(interaction.user.id);
-      }
-      // 参加申込キャンセルボタン (参加フロー中)
-      else if (customId === 'cancel_join') {
-          tempUserData.delete(interaction.user.id);
-          await interaction.update({ content: '参加申込をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Join Update Error:", e) });
-      }
-      // テストボタン
-      else if (customId === 'simple_test') {
-          await interaction.reply({ content: 'テストボタン動作OK！', ephemeral: true });
-      }
-      // テスト参加者追加ボタン (募集メッセージ上)
-      else if (customId.startsWith('add_test_participants_')) {
-          if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '管理者権限が必要です。', ephemeral: true });
-          const recruitmentId = customId.replace('add_test_participants_', '');
-          await showTestParticipantAddOptions(interaction, recruitmentId);
-      }
-      // テスト参加者確定ボタン (確認UI上)
-      else if (customId.startsWith('confirm_test_participants_')) {
-          if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.update({ content: '管理者権限が必要です。', embeds:[], components:[], ephemeral: true });
-          const parts = customId.split('_');
-          if (parts.length < 5) throw new Error(`不正なテスト参加者確定ID: ${customId}`);
-          const recruitmentId = parts[3];
-          const count = parseInt(parts[4], 10);
-          if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${parts[4]}`);
-          await confirmAddTestParticipants(interaction, recruitmentId, count);
-      }
-      // テスト参加者キャンセルボタン (確認UI上)
-      else if (customId === 'cancel_test_participants') {
-          await interaction.update({ content: 'テスト参加者の追加をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Test Update Error:", e) });
-      }
-      // ★★★ 追加: 複数レイド選択完了ボタン ★★★
-      else if (customId.startsWith('multi_raid_confirm_')) {
-        const recruitmentId = customId.replace('multi_raid_confirm_', '');
-        await startAttributeSelectionForRaids(interaction, recruitmentId);
-      }
-      // その他の未処理ボタン
-      else {
-        console.warn(`未処理のボタンID: ${customId}`);
-        await interaction.reply({ content: 'このボタンは現在処理できません。', ephemeral: true }).catch(() => {});
-      }
-    } catch (error) {
-      console.error(`ボタン処理エラー (ID: ${customId}, User: ${interaction.user.tag}):`, error);
-      await handleErrorReply(interaction, error, `ボタン (${customId}) の処理中にエラーが発生しました。`);
-    } /*finally {
-        console.log(`ボタン処理終了: ${customId}, User: ${interaction.user.tag}`);
-    }*/ // 頻繁なログは抑制
+        await interaction.update({ content: '参加申込をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Join Update Error:", e) });
+    }
+    // テストボタン
+    else if (customId === 'simple_test') {
+        await interaction.reply({ content: 'テストボタン動作OK！', ephemeral: true });
+    }
+    // テスト参加者追加ボタン (募集メッセージ上)
+    else if (customId.startsWith('add_test_participants_')) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '管理者権限が必要です。', ephemeral: true });
+        const recruitmentId = customId.replace('add_test_participants_', '');
+        await showTestParticipantAddOptions(interaction, recruitmentId);
+    }
+    // テスト参加者確定ボタン (確認UI上)
+    else if (customId.startsWith('confirm_test_participants_')) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.update({ content: '管理者権限が必要です。', embeds:[], components:[], ephemeral: true });
+        const parts = customId.split('_');
+        if (parts.length < 5) throw new Error(`不正なテスト参加者確定ID: ${customId}`);
+        const recruitmentId = parts[3];
+        const count = parseInt(parts[4], 10);
+        if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${parts[4]}`);
+        await confirmAddTestParticipants(interaction, recruitmentId, count);
+    }
+    // テスト参加者キャンセルボタン (確認UI上)
+    else if (customId === 'cancel_test_participants') {
+        await interaction.update({ content: 'テスト参加者の追加をキャンセルしました。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Cancel Test Update Error:", e) });
+    }
+    // その他の未処理ボタン
+    else {
+      console.warn(`未処理のボタンID: ${customId}`);
+      await interaction.reply({ content: 'このボタンは現在処理できません。', ephemeral: true }).catch(() => {});
+    }
+  } catch (error) {
+    console.error(`ボタン処理エラー (ID: ${customId}, User: ${interaction.user.tag}):`, error);
+    await handleErrorReply(interaction, error, `ボタン (${customId}) の処理中にエラーが発生しました。`);
   }
+}
   
   // 備考入力モーダル表示関数
   async function showRemarksModal(interaction, recruitmentId) {
@@ -623,93 +616,96 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
 
   
   
-  // セレクトメニュー処理関数
-  async function handleSelectMenuInteraction(interaction) {
-    const customId = interaction.customId;
-    // console.log(`セレクトメニュー処理開始: ${customId}, User: ${interaction.user.tag}, Values: ${interaction.values.join(',')}`);
-  
-    try {
-      // 時間選択メニュー (募集作成用)
-      if (customId.startsWith('time_select_')) {
-        const parts = customId.split('_');
-        if (parts.length < 4) throw new Error(`不正な時間選択ID: ${customId}`);
-        const raidType = parts[2];
-        const date = parts[3];
-        const selectedTime = interaction.values[0];
-        await confirmRecruitment(interaction, raidType, date, selectedTime);
-      }
-      // 参加タイプ選択
-      else if (customId.startsWith('join_type_')) {
-        const parts = customId.split('_');
-         if (parts.length < 3) throw new Error(`不正な参加タイプID: ${customId}`);
-        const recruitmentId = parts[2];
-        const selectedType = interaction.values[0];
-        // ★★★ フローを分岐 ★★★
-        const recruitment = activeRecruitments.get(recruitmentId);
-        if (recruitment.type === '参加者希望') {
-          // 「参加者希望」募集の場合は、新しい専用のフローを呼び出す
-          await showMultiRaidSelection(interaction, recruitmentId, selectedType);
-        } else {
-          // 通常の募集の場合は、従来の属性選択フローを呼び出す
-          await showAttributeSelection(interaction, recruitmentId, selectedType);
-        }
-      }
-      // 属性選択
-      else if (customId.startsWith('attribute_select_')) {
-        const parts = customId.split('_');
-         if (parts.length < 4) throw new Error(`不正な属性選択ID: ${customId}`);
-        const recruitmentId = parts[2];
-        const joinType = parts[3];
-        let selectedAttributes = interaction.values;
-        // ★★★ 「全属性」選択の処理を追加 ★★★
-        if (selectedAttributes.includes('all_attributes')) {
-            selectedAttributes = [...attributes];
-        }
-        await showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes);
-      }
-      // ★★★ CustomIDの100文字制限対策を施した時間選択処理 ★★★
-      else if (customId.startsWith('time_availability_select_')) {
-        const recruitmentId = customId.replace('time_availability_select_', '');
-        const selectedTime = interaction.values[0];
+ // セレクトメニュー処理関数
+async function handleSelectMenuInteraction(interaction) {
+  const customId = interaction.customId;
+  // console.log(`セレクトメニュー処理開始: ${customId}, User: ${interaction.user.tag}, Values: ${interaction.values.join(',')}`);
 
-        // 一時データからユーザー情報を取得
-        const userData = tempUserData.get(interaction.user.id);
-        if (!userData || userData.recruitmentId !== recruitmentId) {
-            throw new Error('時間選択プロセスでユーザーデータが見つかりません。最初からやり直してください。');
-        }
+  try {
+    // 時間選択メニュー (募集作成用)
+    if (customId.startsWith('time_select_')) {
+      const parts = customId.split('_');
+      if (parts.length < 4) throw new Error(`不正な時間選択ID: ${customId}`);
+      const raidType = parts[2];
+      const date = parts[3];
+      const selectedTime = interaction.values[0];
+      await confirmRecruitment(interaction, raidType, date, selectedTime);
+    }
+    // ★★★ 参加タイプ選択のロジックを全面的に書き換え ★★★
+    else if (customId.startsWith('join_type_')) {
+      const recruitmentId = customId.replace('join_type_', '');
+      const selectedRaids = interaction.values;
 
-        // 取得したデータを使って次のステップへ
-        await showJoinConfirmation(interaction, recruitmentId, userData.joinType, [], selectedTime);
+      // 一時データを準備
+      tempUserData.set(interaction.user.id, {
+        recruitmentId,
+        joinType: '参加者希望', // デフォルト
+        attributesByRaid: {}, 
+        raidsToSelect: [],
+        selectionIndex: 0,
+      });
+      
+      const userData = tempUserData.get(interaction.user.id);
+      
+      // 「なんでも可」が選択されたかチェック
+      if (selectedRaids.includes('なんでも可')) {
+          userData.joinType = 'なんでも可';
+          // 「なんでも可」の場合は、選択対象のレイドを全てのレイドタイプにする
+          userData.raidsToSelect = raidTypes.filter(type => type !== '参加者希望');
+      } else {
+          // 通常の募集、または参加者希望で特定のレイドが選ばれた場合
+          const recruitment = activeRecruitments.get(recruitmentId);
+          if (recruitment.type !== '参加者希望') {
+              // 通常募集の場合
+              userData.joinType = selectedRaids[0];
+              userData.raidsToSelect = selectedRaids;
+          } else {
+              // 参加者希望で特定のレイドが選ばれた場合
+              userData.joinType = '参加者希望';
+              userData.raidsToSelect = selectedRaids;
+          }
       }
-       // テスト参加者数選択メニュー
-      else if (customId.startsWith('test_participant_count_')) {
-         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.update({ content: '管理者権限が必要です。', embeds:[], components:[], ephemeral: true });
-         const recruitmentId = customId.replace('test_participant_count_', '');
-         const count = parseInt(interaction.values[0], 10);
-          if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${interaction.values[0]}`);
-         await showTestParticipantConfirmation(interaction, recruitmentId, count);
-      }
-      // ★★★ 追加: 複数レイド選択メニュー ★★★
-      else if (customId.startsWith('multi_raid_select_')) {
-        const recruitmentId = customId.replace('multi_raid_select_', '');
-        const userData = tempUserData.get(interaction.user.id);
-        if (!userData) throw new Error('ユーザーデータが見つかりません');
-        
-        // 最初に選んだレイドと、追加で選んだレイドを結合する
-        const initialRaid = userData.raidsToSelect[0];
-        const additionalRaids = interaction.values;
-        // 重複を除いて結合
-        const combinedRaids = new Set([initialRaid, ...additionalRaids]);
-        userData.raidsToSelect = Array.from(combinedRaids);
-        tempUserData.set(interaction.user.id, userData);
 
-        // 確認メッセージを更新
-        await interaction.update({
-            content: `希望レイド: **${userData.raidsToSelect.join(', ')}**\n下のボタンを押して属性選択に進んでください。`,
-        });
+      // 属性選択フローを開始
+      await startAttributeSelectionForRaids(interaction, recruitmentId);
+    }
+    // 属性選択
+    else if (customId.startsWith('attribute_select_')) {
+      const parts = customId.split('_');
+       if (parts.length < 4) throw new Error(`不正な属性選択ID: ${customId}`);
+      const recruitmentId = parts[2];
+      const joinType = parts[3];
+      let selectedAttributes = interaction.values;
+      // 「全属性」選択の処理を追加
+      if (selectedAttributes.includes('all_attributes')) {
+          selectedAttributes = [...attributes];
       }
-      // ★★★ 追加: レイドごとの属性選択メニュー ★★★
-      else if (customId.startsWith('attribute_select_per_raid_')) {
+      await showTimeAvailabilitySelection(interaction, recruitmentId, joinType, selectedAttributes);
+    }
+    // ★★★ CustomIDの100文字制限対策を施した時間選択処理 ★★★
+    else if (customId.startsWith('time_availability_select_')) {
+      const recruitmentId = customId.replace('time_availability_select_', '');
+      const selectedTime = interaction.values[0];
+
+      // 一時データからユーザー情報を取得
+      const userData = tempUserData.get(interaction.user.id);
+      if (!userData || userData.recruitmentId !== recruitmentId) {
+          throw new Error('時間選択プロセスでユーザーデータが見つかりません。最初からやり直してください。');
+      }
+
+      // 取得したデータを使って次のステップへ
+      await showJoinConfirmation(interaction, recruitmentId, userData.joinType, [], selectedTime);
+    }
+     // テスト参加者数選択メニュー
+    else if (customId.startsWith('test_participant_count_')) {
+       if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.update({ content: '管理者権限が必要です。', embeds:[], components:[], ephemeral: true });
+       const recruitmentId = customId.replace('test_participant_count_', '');
+       const count = parseInt(interaction.values[0], 10);
+        if (isNaN(count)) throw new Error(`テスト参加者数解析エラー: ${interaction.values[0]}`);
+       await showTestParticipantConfirmation(interaction, recruitmentId, count);
+    }
+    // レイドごとの属性選択メニュー
+    else if (customId.startsWith('attribute_select_per_raid_')) {
         const recruitmentId = customId.replace('attribute_select_per_raid_', '');
         const userData = tempUserData.get(interaction.user.id);
         if (!userData) throw new Error('ユーザーデータが見つかりません');
@@ -728,19 +724,17 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
 
         // 次の属性選択画面を表示
         await showNextAttributeSelection(interaction, recruitmentId);
-      }
-      // その他のセレクトメニュー
-      else {
-        console.warn(`未処理のセレクトメニューID: ${customId}`);
-        await interaction.update({ content: 'このメニューは現在処理できません。', components: [] }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
-      }
-    } catch (error) {
-      console.error(`セレクトメニュー処理エラー (ID: ${customId}, User: ${interaction.user.tag}):`, error);
-      await handleErrorReply(interaction, error, `メニュー (${customId}) の処理中にエラーが発生しました。`);
-    } /* finally {
-        console.log(`セレクトメニュー処理終了: ${customId}, User: ${interaction.user.tag}`);
-    } */ // 抑制
+    }
+    // その他のセレクトメニュー
+    else {
+      console.warn(`未処理のセレクトメニューID: ${customId}`);
+      await interaction.update({ content: 'このメニューは現在処理できません。', components: [] }).catch(e => { if(e.code !== 10062) console.error("Update Error:", e) });
+    }
+  } catch (error) {
+    console.error(`セレクトメニュー処理エラー (ID: ${customId}, User: ${interaction.user.tag}):`, error);
+    await handleErrorReply(interaction, error, `メニュー (${customId}) の処理中にエラーが発生しました。`);
   }
+}
   
   // 募集開始処理
   async function startRecruitment(messageOrInteraction) {
@@ -890,106 +884,56 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   }
   
   // 参加オプション表示
-  async function showJoinOptions(interaction, recruitmentId) {
-    // debugLog('JoinOptions', `参加オプション表示: ${recruitmentId}, User: ${interaction.user.tag}`);
-    const recruitment = activeRecruitments.get(recruitmentId);
-    if (!recruitment || recruitment.status !== 'active') return interaction.reply({ content: 'この募集は現在参加を受け付けていません。', ephemeral: true });
-    const existingParticipation = recruitment.participants.find(p => p.userId === interaction.user.id);
-    if (existingParticipation) return interaction.reply({ content: `✅参加表明済みです。変更はキャンセル後再申込してください。`, ephemeral: true });
-    const dateObj = new Date(recruitment.date + 'T00:00:00Z');
-    const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
-    let selectOptions = []; let embedDescription = `【${recruitment.type}】${formattedDate} ${recruitment.time}\n\n`;
-   if (recruitment.type === '参加者希望') {
-      selectOptions = raidTypes
-        .filter(type => type !== '参加者希望') 
-        .map(type => ({
-          label: `${type} のみ希望`,
-          value: type
-        }));
-      selectOptions.push({ label: 'どちらでも可', value: 'なんでも可' });
-      embedDescription += '参加したいコンテンツを選択してください。';
-    } else {
-      selectOptions = [ { label: `${recruitment.type} に参加`, value: recruitment.type } ];
-      embedDescription += `この募集 (${recruitment.type}) に参加しますか？`;
-    }
-    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`join_type_${recruitmentId}`).setPlaceholder(recruitment.type === '参加者希望' ? '参加タイプを選択' : `${recruitment.type} に参加`).addOptions(selectOptions).setMinValues(1).setMaxValues(1));
-    const embed = new EmbedBuilder().setTitle('🎮 参加申込').setDescription(embedDescription).setColor('#2ECC71');
-    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
-  }
+async function showJoinOptions(interaction, recruitmentId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  if (!recruitment || recruitment.status !== 'active') return interaction.reply({ content: 'この募集は現在参加を受け付けていません。', ephemeral: true });
   
-  // 属性選択UI表示
-  async function showAttributeSelection(interaction, recruitmentId, joinType) {
-    // debugLog('AttributeSelection', `属性選択UI表示: ${recruitmentId}, Type: ${joinType}, User: ${interaction.user.tag}`);
-    const recruitment = activeRecruitments.get(recruitmentId);
-    if (!recruitment || recruitment.status !== 'active') return interaction.update({ content: 'この募集は現在参加を受け付けていません。', embeds: [], components: [] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
+  const existingParticipation = recruitment.participants.find(p => p.userId === interaction.user.id);
+  // ★★★ エラーメッセージをより具体的に修正 ★★★
+  if (existingParticipation) return interaction.reply({ content: `✅ 参加表明済みです。\n変更したい場合は、一度「参加キャンセル」ボタンでキャンセルしてから、再度申込してください。`, ephemeral: true });
+
+  const dateObj = new Date(recruitment.date + 'T00:00:00Z');
+  const formattedDate = dateObj.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
+  
+  let components;
+  let embedDescription = `【${recruitment.type}】${formattedDate} ${recruitment.time}\n\n`;
+
+  // ★★★ 「参加者希望」の場合のロジックを全面的に書き換え ★★★
+  if (recruitment.type === '参加者希望') {
+    embedDescription += '参加を希望するレイドを**すべて選択**してください。\n「どれでも可」を選択した場合は、他のレイドも選択している場合でも「どれでも可」として扱われます。';
     
-    // ★★★ 「全属性」の選択肢を追加 ★★★
-    const attributeOptions = [
-        { label: '全属性', value: 'all_attributes', description: 'すべての属性で参加可能です' },
-        ...attributes.map(attr => ({ label: attr, value: attr, description: `${attr}属性で参加可能` }))
-      ];
-
-    const row = new ActionRowBuilder().addComponents( new StringSelectMenuBuilder().setCustomId(`attribute_select_${recruitmentId}_${joinType}`).setPlaceholder('担当可能な属性を選択 (複数可)').setMinValues(1).setMaxValues(attributeOptions.length).addOptions(attributeOptions));
-    const embed = new EmbedBuilder().setTitle('🔮 属性選択').setDescription(`参加タイプ: **${joinType}**\n\n担当できる属性をすべて選択してください。`).setColor('#2ECC71');
-    await interaction.update({ embeds: [embed], components: [row] }).catch(e => { if(e.code !== 10062) console.error("Attr Select Update Error:", e) });
-  }
-
-// ★★★ 新規追加: 「参加者希望」時の複数レイド選択UI表示 ★★★
-async function showMultiRaidSelection(interaction, recruitmentId, firstSelectedRaid) {
-    // 一時データに参加情報をセットアップ
-    tempUserData.set(interaction.user.id, {
-      recruitmentId,
-      joinType: '参加者希望',
-      attributesByRaid: {}, 
-      raidsToSelect: [],
-      selectionIndex: 0,
-    });
-  
     const availableRaids = raidTypes.filter(type => type !== '参加者希望');
-    
-    // ユーザーが「なんでも可」を選んだ場合
-    if (firstSelectedRaid === 'なんでも可') {
-      const userData = tempUserData.get(interaction.user.id);
-      userData.joinType = 'なんでも可'; // joinTypeを更新
-      tempUserData.set(interaction.user.id, userData);
-      // 既存の属性選択フローを呼び出す
-      await showAttributeSelection(interaction, recruitmentId, 'なんでも可');
-      return;
-    }
-    
-    // 特定のレイドを選んだ場合、他にも希望があるか確認する
-    let userData = tempUserData.get(interaction.user.id);
-    userData.raidsToSelect.push(firstSelectedRaid);
-    
-    const remainingRaids = availableRaids.filter(r => r !== firstSelectedRaid);
-  
-    const raidOptions = remainingRaids.map(raid => ({
-        label: raid,
-        value: raid
+    const selectOptions = availableRaids.map(type => ({
+        label: type,
+        value: type
     }));
+    // 「どちらでも可」の選択肢をリストの最後に追加
+    selectOptions.push({ label: 'どれでも可', value: 'なんでも可' });
     
-    const embed = new EmbedBuilder()
-      .setTitle('他にも希望するレイドはありますか？')
-      .setDescription(`最初に **${firstSelectedRaid}** を選択しました。\n他にも希望するレイドがあれば選択してください（複数可）。\nなければ「選択を完了」ボタンを押してください。`)
-      .setColor('#2ECC71');
-  
     const menu = new StringSelectMenuBuilder()
-      .setCustomId(`multi_raid_select_${recruitmentId}`)
-      .setPlaceholder('追加で希望するレイドを選択')
-      .addOptions(raidOptions)
-      .setMinValues(0)
-      .setMaxValues(raidOptions.length);
-      
-    const row1 = new ActionRowBuilder().addComponents(menu);
-    const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`multi_raid_confirm_${recruitmentId}`)
-        .setLabel('選択を完了して属性入力へ進む')
-        .setStyle(ButtonStyle.Success)
-    );
-  
-    await interaction.update({ embeds: [embed], components: [row1, row2] });
+        .setCustomId(`join_type_${recruitmentId}`)
+        .setPlaceholder('参加したいレイドを選択 (複数可)')
+        .addOptions(selectOptions)
+        .setMinValues(1)
+        .setMaxValues(selectOptions.length); // 選択肢の数だけ選択可能にする
+
+    components = [new ActionRowBuilder().addComponents(menu)];
+
+  } else {
+    embedDescription += `この募集 (${recruitment.type}) に参加しますか？`;
+    const selectOptions = [ { label: `${recruitment.type} に参加`, value: recruitment.type } ];
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId(`join_type_${recruitmentId}`)
+        .setPlaceholder(`${recruitment.type} に参加`)
+        .addOptions(selectOptions);
+    components = [new ActionRowBuilder().addComponents(menu)];
+  }
+
+  const embed = new EmbedBuilder().setTitle('🎮 参加申込').setDescription(embedDescription).setColor('#2ECC71');
+  await interaction.reply({ embeds: [embed], components: components, ephemeral: true });
 }
+
+
   
 // ★★★ 新規追加: レイドごとの属性選択プロセスを開始する関数 ★★★
 async function startAttributeSelectionForRaids(interaction, recruitmentId) {
