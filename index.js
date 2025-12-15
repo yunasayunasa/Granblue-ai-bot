@@ -12,7 +12,10 @@ const {
     ButtonStyle,
     GatewayIntentBits,
     InteractionType,
-    PermissionsBitField
+    PermissionsBitField,
+    REST,
+    Routes,
+    SlashCommandBuilder
   } = require('discord.js');
   
   // 環境変数をロード
@@ -170,7 +173,7 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
   }
   
   // 古い募集のクリーンアップ処理
-  function cleanupOldRecruitments() {
+  async function cleanupOldRecruitments() {
     const now = new Date();
     let cleanupCount = 0;
     const recruitmentsToDelete = [];
@@ -209,10 +212,25 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
       }
     });
   
-    recruitmentsToDelete.forEach(id => {
+    for (const id of recruitmentsToDelete) {
+        const recruitment = activeRecruitments.get(id);
+        if (recruitment && recruitment.channel && recruitment.messageId) {
+             try {
+                const channel = await client.channels.fetch(recruitment.channel).catch(() => null);
+                if (channel && channel.isTextBased()) {
+                    const message = await channel.messages.fetch(recruitment.messageId).catch(() => null);
+                    if (message) {
+                        await message.delete().catch(e => console.error(`メッセージ削除失敗 (ID: ${id}):`, e.message));
+                        debugLog('Cleanup', `募集メッセージを削除: ${id}`);
+                    }
+                }
+            } catch (error) {
+                console.error(`クリーンアップ時のメッセージ削除エラー (ID: ${id}):`, error);
+            }
+        }
         activeRecruitments.delete(id);
         cleanupCount++;
-    });
+    }
   
     if (cleanupCount > 0) {
         console.log(`古い募集 ${cleanupCount}件をクリーンアップしました。残り: ${activeRecruitments.size}件`);
@@ -223,10 +241,40 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     }
   }
   
+  // スラッシュコマンド登録関数
+  async function registerCommands() {
+    const commands = [
+      new SlashCommandBuilder().setName('recruit').setDescription('新しい募集を開始します (募集)'),
+      new SlashCommandBuilder().setName('list').setDescription('現在のアクティブな募集一覧を表示します (募集リスト)'),
+      new SlashCommandBuilder().setName('help').setDescription('ボットのヘルプを表示します (募集ヘルプ)'),
+    ].map(command => command.toJSON());
+
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+    try {
+      console.log('スラッシュコマンドの登録を開始します...');
+      // ギルドIDがあればギルドコマンドとして、なければグローバルコマンドとして登録
+      const guildId = process.env.GUILD_ID; 
+      
+      if (guildId) {
+          await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
+          console.log(`スラッシュコマンドをギルド (${guildId}) に登録しました。`);
+      } else {
+          await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+          console.log('スラッシュコマンドをグローバルに登録しました (反映に時間がかかる場合があります)。');
+      }
+    } catch (error) {
+      console.error('スラッシュコマンドの登録中にエラーが発生しました:', error);
+    }
+  }
+
   // ボット準備完了時の処理
   client.once('ready', () => {
     console.log(`${client.user.tag} でログインしました！`);
     console.log('Discord.js バージョン:', require('discord.js').version);
+
+    // スラッシュコマンド登録
+    registerCommands();
   
     // 保存済みデータがあればロード
     const loadedData = loadRecruitmentData();
@@ -294,7 +342,16 @@ console.log(`[Config] Data Path: ${DATA_FILE_PATH}`);
     if (interaction.user.bot) return;
   
     try {
-      if (interaction.isButton()) {
+      if (interaction.isChatInputCommand()) {
+          const commandName = interaction.commandName;
+          if (commandName === 'recruit') {
+              await startRecruitment(interaction);
+          } else if (commandName === 'list') {
+              await showActiveRecruitments(interaction);
+          } else if (commandName === 'help') {
+              await showHelp(interaction);
+          }
+      } else if (interaction.isButton()) {
         await handleButtonInteraction(interaction);
       } else if (interaction.isStringSelectMenu()) {
         await handleSelectMenuInteraction(interaction);
@@ -1140,6 +1197,36 @@ async function confirmParticipation(interaction, recruitmentId, joinType, attrib
     saveRecruitmentData();
   }
   
+  // 未割り当て参加者の詳細リスト生成ヘルパー
+  function formatUnassignedList(participants) {
+    if (!participants || participants.length === 0) return '';
+    
+    return participants.map(p => {
+        let info = `- <@${p.userId}>`;
+        
+        // 希望レイドと属性の表示
+        let requestInfo = [];
+        if (p.joinType === 'なんでも可') {
+             requestInfo.push('なんでも可');
+        } else if (p.attributesByRaid) {
+            Object.entries(p.attributesByRaid).forEach(([raid, attrs]) => {
+                requestInfo.push(`${raid}:[${attrs.join('/')}]`);
+            });
+        } else if (p.attributes) {
+            requestInfo.push(`[${p.attributes.join('/')}]`);
+        }
+        
+        if (requestInfo.length > 0) info += ` (希望: ${requestInfo.join(', ')})`;
+        
+        // 備考の表示
+        if (p.remarks && p.remarks.trim() !== '') {
+            info += ` (📝 ${p.remarks})`;
+        }
+        
+        return info;
+    }).join('\n');
+  }
+
   // 募集締め切り処理
   async function closeRecruitment(interaction, recruitmentId) {
     debugLog('CloseRecruitment', `募集締め切り処理: ${recruitmentId}, User: ${interaction.user.tag}`);
@@ -1195,7 +1282,7 @@ async function confirmParticipation(interaction, recruitmentId, joinType, attrib
 
           if (unassignedParticipants.length > 0) {
               assignedText += `\n**※以下の参加者は今回割り当てられませんでした:**\n`;
-              assignedText += unassignedParticipants.map(p => `- <@${p.userId}>`).join('\n');
+              assignedText += formatUnassignedList(unassignedParticipants);
           }
          
          const realUserIdsToMention = assignedParticipants.map(p => p.userId).filter(userId => /^\d+$/.test(userId));
@@ -1488,7 +1575,10 @@ activeRecruitmentEntries.forEach(async ([id, recruitment]) => {
                 assignedText += `【${attr}】: ${participantText}\n`;
              });
              
-              if (unassignedP.length > 0) assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n${unassignedP.map(p => `- <@${p.userId}>`).join('\n')}`;
+              if (unassignedP.length > 0) {
+                  assignedText += `\n**※未割り当て (${unassignedP.length}名):**\n`;
+                  assignedText += formatUnassignedList(unassignedP);
+              }
 
               try {
                   if (assignedText.length > 2000) {
