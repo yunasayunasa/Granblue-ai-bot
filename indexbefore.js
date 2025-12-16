@@ -1,4 +1,4 @@
-// Discord.jsの必要なクラスをインポート
+// Discord.jsの必要なクラスをインポートデプロイテスト
 const {
     Client,
     Partials,
