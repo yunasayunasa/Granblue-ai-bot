@@ -399,7 +399,7 @@ async function cleanupOldRecruitments() {
   if (expiredIds.length > 0) {
     console.log(`古い募集 ${expiredIds.length}件をクリーンアップしました。残り: ${activeRecruitments.size}件`);
     saveRecruitmentData();
-    Object.keys(boards).forEach(requestBoardUpdate);
+    Object.keys(boards).forEach(guildId => requestBoardUpdate(guildId));
   }
 }
 
@@ -484,7 +484,7 @@ client.once('ready', async () => {
   setInterval(saveRecruitmentData, 2 * 60 * 1000); // 2分ごとにデータ保存
   setInterval(checkSchedules, 60 * 1000); // 1分ごとに仮確定・本確定をチェック
   setInterval(cleanupOldRecruitments, 60 * 60 * 1000); // 1時間ごとに古い募集をクリーンアップ
-  setInterval(() => Object.keys(boards).forEach(requestBoardUpdate), 10 * 60 * 1000); // 開始した募集をボードから外す
+  setInterval(() => Object.keys(boards).forEach(guildId => requestBoardUpdate(guildId)), 10 * 60 * 1000); // 開始した募集をボードから外す
 
   await cleanupOldRecruitments();
   await refreshAllCards();
@@ -981,7 +981,8 @@ async function publishRecruitments(interaction) {
     console.error('募集作成エラー:', error);
   }
   saveRecruitmentData();
-  requestBoardUpdate(interaction.guildId);
+  // ボードと同じチャンネルに募集が出たら、ボードを募集の下に貼り直す
+  requestBoardUpdate(interaction.guildId, { moveToBottom: created.length > 0 && boards[interaction.guildId]?.channelId === interaction.channelId });
 
   if (created.length === 0) {
     return interaction.editReply({ content: '募集メッセージ作成中にエラーが発生しました。' }).catch(() => { });
@@ -2040,9 +2041,12 @@ function buildBoardMessage(guildId) {
 }
 
 const boardUpdateTimers = new Map();
-// 短時間に続く更新をまとめてボードに反映する
-function requestBoardUpdate(guildId) {
-  if (!guildId || !boards[guildId] || boardUpdateTimers.has(guildId)) return;
+const boardMoveRequests = new Set(); // 次の更新でボードを一番下に貼り直すサーバー
+// 短時間に続く更新をまとめてボードに反映する。moveToBottom なら、ボードが埋もれていれば一番下に貼り直す
+function requestBoardUpdate(guildId, { moveToBottom = false } = {}) {
+  if (!guildId || !boards[guildId]) return;
+  if (moveToBottom) boardMoveRequests.add(guildId);
+  if (boardUpdateTimers.has(guildId)) return;
   boardUpdateTimers.set(guildId, setTimeout(() => {
     boardUpdateTimers.delete(guildId);
     updateBoard(guildId).catch(error => console.error('募集ボード更新エラー:', error));
@@ -2052,12 +2056,15 @@ function requestBoardUpdate(guildId) {
 async function updateBoard(guildId) {
   const board = boards[guildId];
   if (!board) return;
+  const moveToBottom = boardMoveRequests.delete(guildId);
   try {
     const channel = await client.channels.fetch(board.channelId);
+    if (moveToBottom && channel.lastMessageId !== board.messageId) return await repostBoard(guildId, channel);
     const message = await channel.messages.fetch(board.messageId);
     await message.edit(buildBoardMessage(guildId));
   } catch (error) {
-    if (error.code === 10008 || error.code === 10003) { // ボードのメッセージ・チャンネルが削除された
+    // ボードのメッセージ・チャンネルが削除された（貼り直しで別のメッセージに替わっていれば何もしない）
+    if ((error.code === 10008 || error.code === 10003) && boards[guildId]?.messageId === board.messageId) {
       console.warn(`募集ボードが見つからないため登録を解除します (Guild: ${guildId})`);
       delete boards[guildId];
       saveBoards();
@@ -2065,6 +2072,16 @@ async function updateBoard(guildId) {
     }
     throw error;
   }
+}
+
+// 新しいボードを一番下に投稿してから、古いボードを消す
+async function repostBoard(guildId, channel) {
+  const old = boards[guildId];
+  const message = await channel.send(buildBoardMessage(guildId));
+  boards[guildId] = { channelId: channel.id, messageId: message.id };
+  saveBoards();
+  await deleteMessage(old.channelId, old.messageId);
+  debugLog('Board', `募集ボードを一番下に貼り直し: Guild=${guildId}`);
 }
 
 async function setupBoard(interaction) {
@@ -2083,16 +2100,9 @@ async function setupBoard(interaction) {
   boards[guildId] = { channelId: channel.id, messageId: message.id };
   saveBoards();
 
-  let pinned = true;
-  try {
-    await message.pin();
-  } catch (error) {
-    pinned = false;
-    console.warn('募集ボードのピン留めに失敗:', error.message);
-  }
   debugLog('Board', `募集ボード設置: Guild=${guildId}, Channel=${channel.id}`);
   await interaction.editReply({
-    content: `📋 募集ボードを設置しました。${pinned ? 'ピン留めもしました。' : '（botにピン留めの権限がないため、ピン留めは手動でお願いします）'}\n募集の作成・参加・確定のたびに自動で更新されます。${old ? '\n前のボードは削除しました。' : ''}`
+    content: `📋 募集ボードを設置しました。\n募集の作成・参加・確定のたびに自動で更新され、このチャンネルに新しい募集が出ると一番下に貼り直されます。${old ? '\n前のボードは削除しました。' : ''}`
   });
 }
 
