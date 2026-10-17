@@ -77,6 +77,7 @@ class FakeChannel {
     };
   }
   isTextBased() { return true; }
+  get lastMessageId() { return [...this.store.keys()].pop() || null; }
   async send(payload) {
     const message = new FakeMessage(this, validate(payload));
     this.store.set(message.id, message);
@@ -223,8 +224,9 @@ async function createRecruitments(user, raid, time, dates = [rc.jstDateString(2)
   const before = channel.sent.length;
   const done = await click(user, 'create_confirm');
   assert.match(done.view.content, /募集を作成しました/u);
-  assert.strictEqual(channel.sent.length, before + dates.length, '日付ごとに募集カードが投稿される');
-  const cardIds = channel.sent.slice(before).map(m => m.id);
+  const cards = channel.sent.slice(before).filter(m => !customIds(m.payload).includes('board_create')); // ボードの貼り直しは除く
+  assert.strictEqual(cards.length, dates.length, '日付ごとに募集カードが投稿される');
+  const cardIds = cards.map(m => m.id);
   return recruitments().filter(r => cardIds.includes(r.messageId)).sort((a, b) => a.date.localeCompare(b.date));
 }
 
@@ -255,7 +257,8 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   const boardSetup = await command(admin, '募集ボード');
   assert.match(boardSetup.view.content, /募集ボードを設置しました/u);
   const board = bot.boards()[GUILD];
-  assert.ok(board && channel.store.get(board.messageId).pinned, 'ボードが設置・ピン留めされる');
+  assert.ok(board && channel.store.get(board.messageId), 'ボードが設置される');
+  assert.strictEqual(channel.lastMessageId, board.messageId);
 
   // 権限のない人はボードを設置できない
   const denied = await command(outsider, '募集ボード');
@@ -263,6 +266,17 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
 
   const r = await createRecruitment(creator, '天元', '21:00');
   assert.strictEqual(r.status, 'active');
+
+  // 同じチャンネルに募集が出ると、ボードが募集の下に貼り直される
+  await bot.updateBoard(GUILD);
+  const movedBoardId = bot.boards()[GUILD].messageId;
+  assert.notStrictEqual(movedBoardId, board.messageId, 'ボードが貼り直される');
+  assert.ok(!channel.store.has(board.messageId), '古いボードは消える');
+  assert.strictEqual(channel.lastMessageId, movedBoardId, 'ボードが一番下にある');
+  assert.ok(JSON.parse(fs.readFileSync(bot.BOARD_FILE_PATH, 'utf8'))[GUILD].messageId === movedBoardId);
+  // 参加などの更新では貼り直さず、その場で書き換える
+  await bot.updateBoard(GUILD);
+  assert.strictEqual(bot.boards()[GUILD].messageId, movedBoardId);
   assert.match(cardText(r), /🟢/u);
   assert.match(cardText(r), /まだ参加者はいません/u);
 
@@ -301,7 +315,7 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
 
   // ボードに載る
   await bot.updateBoard(GUILD);
-  const boardEmbed = embedOf(channel.store.get(board.messageId).payload);
+  const boardEmbed = embedOf(channel.store.get(bot.boards()[GUILD].messageId).payload);
   assert.match(boardEmbed.description, /天元/u);
   assert.match(boardEmbed.description, /3\/6/u);
 
