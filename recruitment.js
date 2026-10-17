@@ -7,6 +7,7 @@ const RAID_TYPES = ['天元', 'ルシゼロ', 'スパバハ', 'ヴェルサシ�
 const FLEX_RAID = '参加者希望'; // 参加者の希望でレイドを決める募集
 const ANY_RAID = 'なんでも可'; // 「どれでも可」を選んだ参加者の joinType
 const START_HOURS = [19, 20, 21, 22, 23]; // 募集・参加可能時間の選択肢
+const LEAVE_HOURS = [20, 21, 22, 23, 24]; // 「何時まで参加できるか」の選択肢
 const PROVISIONAL_HOUR_JST = 8; // 開催日のこの時刻に仮確定
 const FINALIZE_BEFORE_MS = 60 * 60 * 1000; // 開始のこの時間前に本確定
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
@@ -106,6 +107,24 @@ function attributesFor(p, raid) {
   return Array.isArray(attrs) ? attrs.filter(a => ATTRIBUTES.includes(a)) : [];
 }
 
+// 得意な属性（担当できる属性のうち ◎ を付けたもの）
+function preferredFor(p, raid) {
+  if (!p?.preferredByRaid || !raid) return [];
+  const prefs = p.preferredByRaid[raid] || (p.joinType === ANY_RAID ? Object.values(p.preferredByRaid)[0] : null);
+  const attrs = attributesFor(p, raid);
+  return Array.isArray(prefs) ? prefs.filter(a => attrs.includes(a)) : [];
+}
+
+// 参加できる最初の時間（'now' は -1）
+function fromHourOf(p) {
+  return hourOf(p.timeAvailability);
+}
+
+// hour 時の開始に参加できるか（抜ける時間が開始より後なら参加できる）
+function availableAt(p, hour) {
+  return !p.leaveTime || hourOf(p.leaveTime) > hour;
+}
+
 function isTestUser(p) {
   return Boolean(p.isTestParticipant) || !/^\d+$/.test(p.userId);
 }
@@ -118,15 +137,20 @@ function realUserIds(participants) {
   return participants.filter(p => !isTestUser(p)).map(p => p.userId);
 }
 
-// ['火','水'] → '🔥💧'、6属性すべてなら '全属性'
-function attrSummary(attrs) {
+// ['火','水'] → '🔥💧'、6属性すべてなら '全属性'。得意な属性は先頭に ◎ を付ける（例: ◎🔥 💧⛰️）
+function attrSummary(attrs, prefs = []) {
   if (!attrs || attrs.length === 0) return 'なし';
-  if (ATTRIBUTES.every(a => attrs.includes(a))) return '全属性';
-  return ATTRIBUTES.filter(a => attrs.includes(a)).map(a => ATTRIBUTE_EMOJI[a]).join('');
+  const emojis = list => ATTRIBUTES.filter(a => list.includes(a)).map(a => ATTRIBUTE_EMOJI[a]).join('');
+  const preferred = prefs.filter(a => attrs.includes(a));
+  if (ATTRIBUTES.every(a => attrs.includes(a))) return preferred.length > 0 ? `全属性（◎${emojis(preferred)}）` : '全属性';
+  if (preferred.length === 0) return emojis(attrs);
+  const others = attrs.filter(a => !preferred.includes(a));
+  return `◎${emojis(preferred)}${others.length > 0 ? ` ${emojis(others)}` : ''}`;
 }
 
-function timeLabel(time) {
-  return time === 'now' ? '今すぐ' : `${time}〜`;
+// 参加できる時間帯（例: 今すぐ〜 / 21:00〜23:00）
+function timeLabel(time, leaveTime = null) {
+  return `${time === 'now' ? '今すぐ' : time}〜${leaveTime || ''}`;
 }
 
 function wantedRaids(p) {
@@ -136,10 +160,15 @@ function wantedRaids(p) {
 // 参加者の申告内容を1行で（例: 全属性・21:00〜 / 天元 🔥💧 / ルシゼロ 全属性・今すぐ）
 function declarationSummary(p, r) {
   let text;
-  if (r.type !== FLEX_RAID) text = attrSummary(attributesFor(p, r.type));
-  else if (p.joinType === ANY_RAID) text = `どれでも ${attrSummary(Object.values(p.attributesByRaid || {})[0])}`;
-  else text = Object.entries(p.attributesByRaid || {}).map(([raid, attrs]) => `${raid} ${attrSummary(attrs)}`).join(' / ');
-  return `${text}・${timeLabel(p.timeAvailability)}`;
+  if (r.type !== FLEX_RAID) {
+    text = attrSummary(attributesFor(p, r.type), preferredFor(p, r.type));
+  } else if (p.joinType === ANY_RAID) {
+    const raid = Object.keys(p.attributesByRaid || {})[0];
+    text = `どれでも ${attrSummary(attributesFor(p, raid), preferredFor(p, raid))}`;
+  } else {
+    text = Object.keys(p.attributesByRaid || {}).map(raid => `${raid} ${attrSummary(attributesFor(p, raid), preferredFor(p, raid))}`).join(' / ');
+  }
+  return `${text}・${timeLabel(p.timeAvailability, p.leaveTime)}`;
 }
 
 //==========================================================================
@@ -166,18 +195,12 @@ function decideRaid(r) {
   return best;
 }
 
-// 属性の割り振り（二部マッチング）。
-// 参加順に「入れる人は全員入れる」よう、必要なら先に入った人の属性をずらして枠を最大限埋める。
-// 前回の割り振り (assignedAttribute) があれば、なるべくそのままにする。
-function matchSlots(participants, raid, slots = ATTRIBUTES) {
-  const owner = {}; // 属性 → userId
+// 参加順に「入れる人は全員入れる」二部マッチング（必要なら先に入った人の属性をずらす）。属性 → userId を返す
+function matchInJoinOrder(participants, raid, slots) {
+  const owner = {};
   const byId = new Map(participants.map(p => [p.userId, p]));
   const tryPlace = (p, visited) => {
-    const attrs = attributesFor(p, raid).filter(a => slots.includes(a));
-    const ordered = attrs.includes(p.assignedAttribute)
-      ? [p.assignedAttribute, ...attrs.filter(a => a !== p.assignedAttribute)]
-      : attrs;
-    for (const attr of ordered) {
+    for (const attr of attributesFor(p, raid).filter(a => slots.includes(a))) {
       if (visited.has(attr)) continue;
       visited.add(attr);
       if (!owner[attr] || tryPlace(byId.get(owner[attr]), visited)) {
@@ -188,43 +211,112 @@ function matchSlots(participants, raid, slots = ATTRIBUTES) {
     return false;
   };
   participants.forEach(p => tryPlace(p, new Set()));
-  const result = {}; // userId → 属性
-  Object.entries(owner).forEach(([attr, userId]) => { result[userId] = attr; });
+  return owner;
+}
+
+// 入る人が決まったあと、得意な属性に入る人が一番多くなるよう並べる（同点なら前回の枠のまま）。userId → 属性 を返す
+function arrangeMembers(members, raid, slots) {
+  const choices = members.map(p => {
+    const prefs = preferredFor(p, raid);
+    return attributesFor(p, raid)
+      .filter(a => slots.includes(a))
+      .map(attr => ({ attr, gain: (prefs.includes(attr) ? 10 : 0) + (attr === p.assignedAttribute ? 1 : 0) }))
+      .sort((a, b) => b.gain - a.gain);
+  });
+  let best = null;
+  let bestScore = -1;
+  const used = new Set();
+  const current = [];
+  // 入る人は最大6人なので、全部の並べ方を試しても軽い
+  const search = (index, score) => {
+    if (index === members.length) {
+      if (score > bestScore) {
+        bestScore = score;
+        best = [...current];
+      }
+      return;
+    }
+    for (const { attr, gain } of choices[index]) {
+      if (used.has(attr)) continue;
+      used.add(attr);
+      current.push(attr);
+      search(index + 1, score + gain);
+      current.pop();
+      used.delete(attr);
+    }
+  };
+  search(0, 0);
+  const result = {};
+  (best || []).forEach((attr, index) => { result[members[index].userId] = attr; });
   return result;
 }
 
-// 開始時間 = 募集時間と「割り振られた人」の参加可能時間のうち一番遅いもの
+// 属性の割り振り。参加順で入る人を決め、その中で得意な属性を優先して並べる。userId → 属性 を返す
+function matchSlots(participants, raid, slots = ATTRIBUTES) {
+  const memberIds = new Set(Object.values(matchInJoinOrder(participants, raid, slots)));
+  return arrangeMembers(participants.filter(p => memberIds.has(p.userId)), raid, slots);
+}
+
+// 開始時間 = 募集時間と、入る人の参加できる時間のうち一番遅いもの
+function startHourFor(r, members) {
+  return members.reduce((hour, p) => Math.max(hour, fromHourOf(p)), hourOf(r.time));
+}
+
 function computeStartTime(r) {
-  let hour = hourOf(r.time);
+  return formatHour(startHourFor(r, r.participants.filter(p => p.assignedAttribute)));
+}
+
+// 入る人を参加順に決める。後から来た人のせいで開始が遅れ、先に入った人が抜ける時間にかかるなら、後の人は補欠にする
+function selectMembers(r, raid) {
+  let members = [];
   r.participants.forEach(p => {
-    if (p.assignedAttribute) hour = Math.max(hour, hourOf(p.timeAvailability));
+    if (attributesFor(p, raid).length === 0) return;
+    const trial = [...members, p];
+    if (!Object.values(matchInJoinOrder(trial, raid, ATTRIBUTES)).includes(p.userId)) return; // 入れる枠がない
+    const start = startHourFor(r, trial);
+    if (trial.every(m => availableAt(m, start))) members = trial;
   });
-  return formatHour(hour);
+  return members;
 }
 
 // 募集中の自動割り振り（参加・キャンセルのたびに計算し直す）
 function autoAssign(r, raid = decideRaid(r)) {
-  const result = raid ? matchSlots(r.participants, raid) : {};
+  const result = raid ? arrangeMembers(selectMembers(r, raid), raid, ATTRIBUTES) : {};
   r.participants.forEach(p => { p.assignedAttribute = result[p.userId] || null; });
   r.finalRaidType = raid;
   r.finalTime = computeStartTime(r);
 }
 
-// 仮確定・本確定後に空いた枠を補欠から埋める（手動で入れ替えた人はそのまま）。繰り上がった人を返す
+// 今の開始時間に参加できるか（開始までに来られて、開始より後まで残れる）
+function fitsStart(r, p) {
+  const start = hourOf(effectiveStartTime(r));
+  return fromHourOf(p) <= start && availableAt(p, start);
+}
+
+// 仮確定・本確定後に空いた枠を補欠から埋める（手動で入れ替えた人はそのまま）。繰り上がった人を返す。
+// 開始時間が動かないよう、今の開始時間に参加できる人だけを繰り上げる
 function fillEmptySlots(r) {
   const raid = r.finalRaidType || r.type;
   const empty = ATTRIBUTES.filter(attr => !r.participants.some(p => p.assignedAttribute === attr));
-  const reserves = r.participants.filter(p => !p.assignedAttribute);
-  const result = matchSlots(reserves, raid, empty);
+  const candidates = r.participants.filter(p => !p.assignedAttribute && fitsStart(r, p));
+  const result = matchSlots(candidates, raid, empty);
   const promoted = [];
-  reserves.forEach(p => {
+  candidates.forEach(p => {
     if (result[p.userId]) {
       p.assignedAttribute = result[p.userId];
       promoted.push(p);
     }
   });
-  r.finalTime = computeStartTime(r);
+  if (!isFinalized(r)) r.finalTime = computeStartTime(r); // 本確定後は開始時間を変えない
   return promoted;
+}
+
+// 補欠になっている理由（時間が合わない場合のみ）
+function reserveReason(r, p) {
+  const start = hourOf(effectiveStartTime(r));
+  if (!availableAt(p, start)) return `${p.leaveTime}に抜けるため`;
+  if (fromHourOf(p) > start) return `${p.timeAvailability}からのため`;
+  return '';
 }
 
 // 枠の手動編集。targetUserId を attr に入れる（別の枠にいれば入れ替え、補欠からなら元の人が補欠へ）。
@@ -301,6 +393,7 @@ function cardDescription(r) {
   } else if (key === 'finalized') {
     lines.push('🏁 **本確定**');
   }
+  if (r.threadId) lines.push(`💬 調整用スレッド <#${r.threadId}>`);
   if (r.type === FLEX_RAID) {
     const raid = r.finalRaidType ? `${r.finalRaidType}${key === 'active' ? '（希望の多い順で仮決定）' : ''}` : '未定';
     lines.push(`🎯 実施レイド：${raid}`);
@@ -314,7 +407,13 @@ function cardDescription(r) {
   lines.push('', `**割り振り${key === 'active' ? '（仮）' : ''}**`, ...slotLines(r));
   const reserves = reservesOf(r);
   const outsiders = outsidersOf(r);
-  if (reserves.length > 0) lines.push('', `**補欠**：${reserves.map(p => `${who(p)}（${attrSummary(attributesFor(p, r.finalRaidType))}）`).join('、')}`);
+  if (reserves.length > 0) {
+    const reserveText = reserves.map(p => {
+      const reason = reserveReason(r, p);
+      return `${who(p)}（${attrSummary(attributesFor(p, r.finalRaidType), preferredFor(p, r.finalRaidType))}${reason ? `・${reason}` : ''}）`;
+    });
+    lines.push('', `**補欠**：${reserveText.join('、')}`);
+  }
   if (outsiders.length > 0) lines.push(`**今回は対象外**：${outsiders.map(p => `${who(p)}（${wantedRaids(p)}希望）`).join('、')}`);
   return truncate(lines.join('\n'), 4000);
 }
@@ -325,7 +424,8 @@ function participantDetailLines(r) {
   return r.participants.map((p, index) => {
     let slot;
     if (p.assignedAttribute) slot = `${ATTRIBUTE_EMOJI[p.assignedAttribute]}【${p.assignedAttribute}】${key === 'active' ? '（仮）' : ''}`;
-    else slot = attributesFor(p, r.finalRaidType).length > 0 ? '補欠' : '対象外';
+    else if (attributesFor(p, r.finalRaidType).length === 0) slot = '対象外';
+    else slot = `補欠${reserveReason(r, p) ? `（${reserveReason(r, p)}）` : ''}`;
     let line = `**${index + 1}.** ${who(p)}　${slot}\n　申告: ${declarationSummary(p, r)}`;
     if (p.remarks) line += `\n　📝 ${p.remarks}`;
     return line;
@@ -391,6 +491,7 @@ module.exports = {
   FLEX_RAID,
   ANY_RAID,
   START_HOURS,
+  LEAVE_HOURS,
   PROVISIONAL_HOUR_JST,
   STATUS_EMOJI,
   selectableRaids,
@@ -409,6 +510,11 @@ module.exports = {
   statusKey,
   shortId,
   attributesFor,
+  preferredFor,
+  fromHourOf,
+  availableAt,
+  fitsStart,
+  reserveReason,
   isTestUser,
   who,
   realUserIds,

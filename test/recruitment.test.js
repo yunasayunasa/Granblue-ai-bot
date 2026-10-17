@@ -119,3 +119,56 @@ test('カードは名前を1回ずつだけ表示する', () => {
   assert.strictEqual(description.split('<@111>').length - 1, 1);
   assert.strictEqual(description.split('<@222>').length - 1, 1);
 });
+
+test('得意な属性（◎）を優先して並べる', () => {
+  const a = { ...participant('A', ['火', '水']), preferredByRaid: { 天元: ['水'] } };
+  const b = participant('B', ['火', '水']);
+  const r = recruitment([a, b]);
+  rc.autoAssign(r);
+  assert.deepStrictEqual(r.participants.map(p => p.assignedAttribute), ['水', '火']);
+});
+
+test('得意な属性があっても、入れる人は参加順で決まる', () => {
+  const all = ['火', '水', '土', '風', '光', '闇'];
+  const ps = ['A', 'B', 'C', 'D', 'E', 'F'].map(id => participant(id, all));
+  ps.push({ ...participant('G', all), preferredByRaid: { 天元: ['火'] } });
+  const r = recruitment(ps);
+  rc.autoAssign(r);
+  assert.strictEqual(r.participants[6].assignedAttribute, null);
+});
+
+test('先に入った人が抜ける時間にかかるなら、遅く来る人は補欠で開始は遅らせない', () => {
+  const a = { ...participant('A', ['火']), leaveTime: '22:00' };
+  const b = participant('B', ['水'], '22:00');
+  const r = recruitment([a, b]);
+  rc.autoAssign(r);
+  assert.deepStrictEqual(r.participants.map(p => p.assignedAttribute), ['火', null]);
+  assert.strictEqual(r.finalTime, '21:00');
+  assert.strictEqual(rc.reserveReason(r, b), '22:00からのため');
+});
+
+test('開始時間までに抜ける人は補欠', () => {
+  const a = { ...participant('A', ['火']), leaveTime: '22:00' };
+  const r = recruitment([a], { time: '22:00' });
+  rc.autoAssign(r);
+  assert.strictEqual(a.assignedAttribute, null);
+  assert.strictEqual(rc.reserveReason(r, a), '22:00に抜けるため');
+});
+
+test('確定後の繰り上げは、今の開始時間に参加できる人だけ。本確定後は開始時間を変えない', () => {
+  const r = recruitment([participant('A', ['火'], '22:00'), participant('B', ['火'], '23:00'), participant('C', ['火'])]);
+  rc.autoAssign(r); // A=火、開始22:00
+  r.status = 'finalized';
+  assert.strictEqual(r.finalTime, '22:00');
+  r.participants.splice(0, 1); // A がキャンセル
+  const promoted = rc.fillEmptySlots(r);
+  assert.deepStrictEqual(promoted.map(p => p.userId), ['C'], '23:00からの B ではなく C が繰り上がる');
+  assert.strictEqual(r.finalTime, '22:00', '本確定後は開始時間をそのままにする');
+});
+
+test('得意な属性と時間帯の表示', () => {
+  assert.strictEqual(rc.attrSummary(['火', '水', '土'], ['土']), '◎⛰️ 🔥💧');
+  assert.strictEqual(rc.attrSummary(['火', '水', '土', '風', '光', '闇'], ['光']), '全属性（◎✨）');
+  assert.strictEqual(rc.timeLabel('now', '23:00'), '今すぐ〜23:00');
+  assert.strictEqual(rc.timeLabel('21:00'), '21:00〜');
+});

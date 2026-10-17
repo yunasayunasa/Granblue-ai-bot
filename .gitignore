@@ -23,3 +23,6 @@ Thumbs.db
 board_data.json
 *.tmp
 data/
+
+# 前回の参加内容の記録
+user_profiles.json

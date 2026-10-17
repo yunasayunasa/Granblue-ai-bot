@@ -54,6 +54,12 @@ class FakeMessage {
   async edit(payload) { this.payload = { ...this.payload, ...validate(payload) }; return this; }
   async delete() { this.deleted = true; this.channel.store.delete(this.id); }
   async pin() { this.pinned = true; }
+  async startThread({ name }) {
+    assert.ok(name.length <= 100, 'スレッド名が長すぎる');
+    this.thread = new FakeThread(`${this.id}-thread`, this.channel.guildId, name);
+    channels.set(this.thread.id, this.thread);
+    return this.thread;
+  }
 }
 
 class FakeChannel {
@@ -79,8 +85,21 @@ class FakeChannel {
   }
 }
 
+class FakeThread extends FakeChannel {
+  constructor(id, guildId, name) {
+    super(id, guildId);
+    this.name = name;
+    this.memberIds = [];
+    this.members = { add: async userId => { this.memberIds.push(userId); } };
+  }
+  async delete() { this.deleted = true; channels.delete(this.id); }
+  async setArchived() { this.archived = true; }
+}
+
+const channels = new Map();
 const channel = new FakeChannel(CHANNEL, GUILD);
-bot.client.channels.fetch = async id => (id === CHANNEL ? channel : null);
+channels.set(CHANNEL, channel);
+bot.client.channels.fetch = async id => channels.get(id) || null;
 
 function makeUser(id, name, admin = false) {
   return { id, username: name, globalName: name, tag: name, bot: false, admin, toString: () => `<@${id}>` };
@@ -159,37 +178,58 @@ function recruitments() { return Array.from(bot.activeRecruitments().values()); 
 function card(r) { return channel.store.get(r.messageId); }
 function cardText(r) { const e = embedOf(card(r).payload); return `${e.title}\n${e.description}`; }
 
+// 属性 → 得意な属性（2つ以上選んだとき）→ 時間 → 確認 まで進める（id は募集IDか 'bulk'）
+async function fillJoinSteps(user, id, view, { attrs, prefs = [], time, leave = null }) {
+  if (customIds(view).includes(`attribute_select_per_raid_${id}`)) {
+    view = (await choose(user, `attribute_select_per_raid_${id}`, attrs)).view;
+  }
+  if (customIds(view).includes(`join_pref_select_${id}`)) {
+    view = (await choose(user, `join_pref_select_${id}`, prefs.length > 0 ? prefs : ['none'])).view;
+  }
+  view = (await choose(user, `time_availability_select_${id}`, [time])).view;
+  if (leave) view = (await choose(user, `join_leave_${id}`, [leave])).view;
+  assert.ok(embedOf(view).fields.some(f => f.name === '割り振りの見込み'), '確認画面に見込みが出る');
+  return view;
+}
+
 // 参加申込を最後まで進める
-async function join(user, recruitmentId, attrs, time, remarks = null) {
+async function join(user, recruitmentId, attrs, time, { remarks = null, prefs = [], leave = null } = {}) {
   const start = await click(user, `join_recruitment_${recruitmentId}`);
   assert.ok(isEphemeral(start.view), '参加画面は本人だけに表示');
-  await choose(user, `attribute_select_per_raid_${recruitmentId}`, attrs);
-  const timeStep = await choose(user, `time_availability_select_${recruitmentId}`, [time]);
-  const confirm = embedOf(timeStep.view);
-  assert.ok(confirm.fields.some(f => f.name === '割り振りの見込み'), '確認画面に見込みが出る');
+  await fillJoinSteps(user, recruitmentId, start.view, { attrs, prefs, time, leave });
   if (remarks === null) return click(user, `confirm_direct_${recruitmentId}`);
   await click(user, `open_remarks_modal_${recruitmentId}`);
   return submitModal(user, `submit_remarks_${recruitmentId}`, remarks);
 }
 
-async function createRecruitment(user, raid, time) {
+// 募集を作成する（dates を複数渡すとまとめて作成）。作成した募集を日付順に返す
+async function createRecruitments(user, raid, time, dates = [rc.jstDateString(2)]) {
   const start = await command(user, '募集');
   assert.ok(isEphemeral(start.view), '作成画面は本人だけに表示');
   const dateStep = await click(user, `raid_type_${raid}`);
-  const firstDate = findId(dateStep.view, `date_select_${raid}_`);
-  assert.strictEqual(firstDate, `date_select_${raid}_${rc.jstDateString(1)}`, '最初の候補は日本時間の翌日');
-  const date = rc.jstDateString(2);
-  const timeStep = await click(user, `date_select_${raid}_${date}`);
-  // 戻る → 日付選択に戻れる
-  const back = await click(user, findId(timeStep.view, 'create_back_date_'));
+  const dateMenu = dateStep.view.components[0].toJSON().components[0];
+  assert.strictEqual(dateMenu.custom_id, 'create_dates');
+  assert.strictEqual(dateMenu.options[0].value, rc.jstDateString(1), '最初の候補は日本時間の翌日');
+  assert.strictEqual(dateMenu.max_values, 7, '日付は複数選べる');
+  const timeStep = await choose(user, 'create_dates', dates);
+  // 戻る → 日付選択に戻ると、選んだ日付が残っていて「このまま次へ」で進める
+  const back = await click(user, 'create_back_dates');
   assert.match(embedOf(back.view).title, /日付選択/u);
-  await click(user, `date_select_${raid}_${date}`);
-  const confirmStep = await choose(user, `time_select_${raid}_${date}`, [time]);
+  assert.deepStrictEqual(back.view.components[0].toJSON().components[0].options.filter(o => o.default).map(o => o.value), [...dates].sort());
+  await click(user, 'create_next_dates');
+  assert.ok(customIds(timeStep.view).includes('create_time'));
+  const confirmStep = await choose(user, 'create_time', [time]);
+  assert.match(embedOf(confirmStep.view).description, dates.length > 1 ? new RegExp(`${dates.length}件`, 'u') : /募集を開始しますか/u);
   const before = channel.sent.length;
-  const done = await click(user, findId(confirmStep.view, 'confirm_recruitment_'));
+  const done = await click(user, 'create_confirm');
   assert.match(done.view.content, /募集を作成しました/u);
-  assert.strictEqual(channel.sent.length, before + 1, '募集カードが1枚だけ投稿される');
-  return recruitments().find(r => r.messageId === channel.sent[channel.sent.length - 1].id);
+  assert.strictEqual(channel.sent.length, before + dates.length, '日付ごとに募集カードが投稿される');
+  const cardIds = channel.sent.slice(before).map(m => m.id);
+  return recruitments().filter(r => cardIds.includes(r.messageId)).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function createRecruitment(user, raid, time) {
+  return (await createRecruitments(user, raid, time))[0];
 }
 
 test('スラッシュコマンドは日本語名と英語名の両方があり、Discordの名前の規則を満たす', () => {
@@ -239,10 +279,13 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   assert.match(embedOf(edit.view).title, /参加内容の変更/u);
   const attrMenu = edit.view.components[0].toJSON().components[0];
   assert.deepStrictEqual(attrMenu.options.filter(o => o.default).map(o => o.value), ['火', '水']);
-  await click(userB, findId(edit.view, `join_next_${r.id}`));
+  const prefStep = await click(userB, findId(edit.view, `join_next_${r.id}`));
+  assert.ok(customIds(prefStep.view).includes(`join_pref_select_${r.id}`), '属性を2つ以上選ぶと得意な属性を聞かれる');
   const backToAttrs = await click(userB, `join_back_${r.id}`);
   assert.ok(customIds(backToAttrs.view).includes(`attribute_select_per_raid_${r.id}`), '戻るで属性選択へ');
   await click(userB, `join_next_${r.id}`);
+  const timeStep = await click(userB, `join_next_${r.id}`);
+  assert.ok(customIds(timeStep.view).includes(`time_availability_select_${r.id}`));
   await choose(userB, `time_availability_select_${r.id}`, ['22:00']);
   await click(userB, `open_remarks_modal_${r.id}`);
   const changed = await submitModal(userB, `submit_remarks_${r.id}`, '22時から');
@@ -262,19 +305,24 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   assert.match(boardEmbed.description, /天元/u);
   assert.match(boardEmbed.description, /3\/6/u);
 
-  // 当日8:00 → 仮確定（メンションなし）
+  // 当日8:00 → 仮確定。調整用スレッドを作り、参加者を追加してお知らせ（メンションなし）
   setNow(rc.provisionalAtMs(r) + 60 * 1000);
   await bot.checkSchedules();
   assert.strictEqual(r.status, 'provisional');
-  const provisionalNotice = channel.store.get(r.provisionalNoticeId);
-  assert.ok(provisionalNotice, '仮確定のお知らせが出る');
+  const thread = channels.get(r.threadId);
+  assert.ok(thread, '調整用スレッドができる');
+  assert.deepStrictEqual([...thread.memberIds].sort(), [userA.id, userB.id, userC.id].sort());
+  const provisionalNotice = thread.store.get(r.provisionalNoticeId);
+  assert.ok(provisionalNotice, '仮確定のお知らせはスレッドに出る');
   assert.deepStrictEqual(provisionalNotice.payload.allowedMentions.users, [], '仮確定はメンションしない');
   assert.match(cardText(r), /🟡/u);
+  assert.match(cardText(r), new RegExp(`<#${r.threadId}>`, 'u'));
 
-  // 仮確定中に後から参加 → 入れる枠がなければ補欠
+  // 仮確定中に後から参加 → 入れる枠がなければ補欠。スレッドにも追加される
   await join(userD, r.id, ['火'], 'now');
   assert.strictEqual(r.participants.find(p => p.userId === userD.id).assignedAttribute, null);
   assert.match(cardText(r), /補欠/u);
+  assert.ok(thread.memberIds.includes(userD.id));
 
   // 参加者が枠を編集：D を火に入れる → 元の火の人は補欠へ
   const fireBefore = r.participants.find(p => p.assignedAttribute === '火');
@@ -292,12 +340,12 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   const noEdit = await click(outsider, `edit_slots_${r.id}`);
   assert.match(noEdit.view.content, /参加者・募集者・管理者のみ/u);
 
-  // 開始1時間前 → 本確定（割り振られた人だけメンション、仮確定のお知らせは消える）
+  // 開始1時間前 → 本確定（割り振られた人だけメンション。スレッド内の仮確定のお知らせは経緯として残す）
   setNow(rc.finalizeAtMs(r) + 60 * 1000);
   await bot.checkSchedules();
   assert.strictEqual(r.status, 'finalized');
-  assert.ok(provisionalNotice.deleted, '仮確定のお知らせは削除される');
-  const finalNotice = channel.store.get(r.finalNoticeId);
+  assert.ok(!provisionalNotice.deleted, 'スレッド内の仮確定のお知らせは残る');
+  const finalNotice = thread.store.get(r.finalNoticeId);
   const assignedIds = r.participants.filter(p => p.assignedAttribute).map(p => p.userId).sort();
   assert.deepStrictEqual([...finalNotice.payload.allowedMentions.users].sort(), assignedIds);
   assert.match(finalNotice.payload.content, /本確定/u);
@@ -309,7 +357,7 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   assert.match(askCancel.view.content, /空きになり/u);
   await click(userD, `confirm_cancel_participation_${r.id}`);
   assert.strictEqual(fireBefore.assignedAttribute, '火');
-  const promotion = channel.sent[channel.sent.length - 1];
+  const promotion = thread.sent[thread.sent.length - 1];
   assert.match(promotion.payload.content, /繰り上がりました/u);
   assert.deepStrictEqual(promotion.payload.allowedMentions.users, [fireBefore.userId]);
 
@@ -327,7 +375,8 @@ test('募集の流れ（作成→参加→変更→仮確定→枠編集→本�
   setNow(rc.startAtMs(r) + 25 * 60 * 60 * 1000);
   await bot.cleanupOldRecruitments();
   assert.ok(!bot.activeRecruitments().has(r.id));
-  assert.ok(!channel.store.has(r.messageId) && !channel.store.has(r.finalNoticeId));
+  assert.ok(!channel.store.has(r.messageId), 'カードが消える');
+  assert.ok(thread.deleted, 'スレッドも消える');
   restoreNow();
 });
 
@@ -345,12 +394,12 @@ test('募集の編集（日付変更で募集中に戻る・中止）と参加�
   assert.ok(isEphemeral(menu.view));
   await click(creator, `edit_date_${r.id}`);
   const newDate = rc.jstDateString(5);
-  const before = channel.sent.length;
   const edited = await click(creator, `edit_set_date_${r.id}_${newDate}`);
   assert.match(embedOf(edited.view).description, /変更しました/u);
   assert.strictEqual(r.date, newDate);
   assert.strictEqual(r.status, 'active', '仮確定前の日付に戻ったので募集中');
-  const changeNotice = channel.sent[before];
+  const editThread = channels.get(r.threadId);
+  const changeNotice = editThread.sent[editThread.sent.length - 1];
   assert.match(changeNotice.payload.content, /募集内容が変更されました/u);
   assert.deepStrictEqual(changeNotice.payload.allowedMentions.users, [userA.id]);
 
@@ -372,6 +421,7 @@ test('募集の編集（日付変更で募集中に戻る・中止）と参加�
   await click(creator, `confirm_abort_${r.id}`);
   assert.ok(!bot.activeRecruitments().has(r.id));
   assert.ok(!channel.store.has(cardId));
+  assert.ok(editThread.deleted, '中止するとスレッドも消える');
   assert.match(channel.sent[channel.sent.length - 1].payload.content, /中止になりました/u);
 
   // 参加者希望：「どれでも可」は属性選択が1回だけ
@@ -380,8 +430,10 @@ test('募集の編集（日付変更で募集中に戻る・中止）と参加�
   assert.ok(customIds(start.view).includes(`join_type_${flex.id}`));
   const attrStep = await choose(userA, `join_type_${flex.id}`, [rc.ANY_RAID]);
   assert.match(embedOf(attrStep.view).description, /どのレイドでも/u);
-  const timeStep = await choose(userA, `attribute_select_per_raid_${flex.id}`, ['all_attributes']);
-  assert.ok(customIds(timeStep.view).includes(`time_availability_select_${flex.id}`), '1回で時間選択へ');
+  const prefStep = await choose(userA, `attribute_select_per_raid_${flex.id}`, ['all_attributes']);
+  assert.ok(customIds(prefStep.view).includes(`join_pref_select_${flex.id}`));
+  const timeStep = await choose(userA, `join_pref_select_${flex.id}`, ['none']);
+  assert.ok(customIds(timeStep.view).includes(`time_availability_select_${flex.id}`), '属性選択1回で時間選択へ');
   await choose(userA, `time_availability_select_${flex.id}`, ['now']);
   await click(userA, `confirm_direct_${flex.id}`);
   const anyParticipant = flex.participants[0];
@@ -420,6 +472,59 @@ test('募集の編集（日付変更で募集中に戻る・中止）と参加�
   const saved = JSON.parse(fs.readFileSync(bot.DATA_FILE_PATH, 'utf8'));
   assert.ok(saved[flex.id]);
   assert.ok(JSON.parse(fs.readFileSync(bot.BOARD_FILE_PATH, 'utf8'))[GUILD]);
+});
+
+test('まとめて作成・まとめて参加・前回の内容・得意な属性・抜ける時間', async () => {
+  // 3日分をまとめて作成
+  const days = [rc.jstDateString(3), rc.jstDateString(4), rc.jstDateString(6)];
+  const created = await createRecruitments(creator, 'スパバハ', '21:00', days);
+  assert.deepStrictEqual(created.map(r => r.date), days);
+  assert.ok(created.every(r => r.type === 'スパバハ' && r.time === '21:00' && r.status === 'active'));
+
+  // ボードで2件選んでまとめて参加（得意な属性・抜ける時間つき）
+  await bot.updateBoard(GUILD);
+  const boardMenu = channel.store.get(bot.boards()[GUILD].messageId).payload.components[0].toJSON().components[0];
+  assert.ok(boardMenu.max_values >= 3, 'ボードは複数選べる');
+  const bulk = await choose(userD, 'board_join', [created[0].id, created[2].id]);
+  assert.ok(isEphemeral(bulk.view));
+  assert.match(embedOf(bulk.view).title, /まとめて参加（2件）/u);
+  const confirm = await fillJoinSteps(userD, 'bulk', bulk.view, { attrs: ['火', '水', '土'], prefs: ['土'], time: 'now', leave: '23:00' });
+  const preview = embedOf(confirm).fields.find(f => f.name === '割り振りの見込み').value;
+  assert.strictEqual(preview.split('\n').filter(line => line.startsWith('・')).length, 2, '見込みは募集ごとに出る');
+  const done = await click(userD, 'confirm_direct_bulk');
+  assert.match(done.view.content, /2件の募集に参加しました/u);
+  for (const r of [created[0], created[2]]) {
+    const d = r.participants.find(p => p.userId === userD.id);
+    assert.deepStrictEqual(d.attributesByRaid, { スパバハ: ['火', '水', '土'] });
+    assert.deepStrictEqual(d.preferredByRaid, { スパバハ: ['土'] });
+    assert.strictEqual(d.leaveTime, '23:00');
+    assert.strictEqual(d.assignedAttribute, '土', '得意な属性に入る');
+  }
+  assert.ok(!created[1].participants.some(p => p.userId === userD.id), '選ばなかった募集には入らない');
+
+  // 前回の内容を覚えている：別の募集では最初から入っていて「このまま次へ」だけで参加できる
+  const target = created[1];
+  const again = await click(userD, `join_recruitment_${target.id}`);
+  assert.match(embedOf(again.view).description, /前回の内容/u);
+  assert.deepStrictEqual(again.view.components[0].toJSON().components[0].options.filter(o => o.default).map(o => o.value), ['火', '水', '土']);
+  let view = (await click(userD, `join_next_${target.id}`)).view;
+  assert.deepStrictEqual(view.components[0].toJSON().components[0].options.filter(o => o.default).map(o => o.value), ['土'], '得意な属性も覚えている');
+  view = (await click(userD, `join_next_${target.id}`)).view;
+  view = (await click(userD, `join_next_${target.id}`)).view;
+  assert.strictEqual(embedOf(view).fields.find(f => f.name === '参加できる時間').value, '今すぐ〜23:00');
+  await click(userD, `confirm_direct_${target.id}`);
+  assert.strictEqual(target.participants[0].leaveTime, '23:00');
+  assert.ok(JSON.parse(fs.readFileSync(bot.PROFILE_FILE_PATH, 'utf8'))[userD.id], '参加内容がファイルに保存される');
+
+  // 抜ける時間：先に入った人が22:00に抜けるなら、22:00から来る人は補欠（開始を遅らせない）
+  await join(userA, target.id, ['光'], 'now', { leave: '22:00' });
+  await join(userB, target.id, ['闇'], '22:00');
+  assert.strictEqual(target.participants.find(p => p.userId === userA.id).assignedAttribute, '光');
+  assert.strictEqual(target.participants.find(p => p.userId === userB.id).assignedAttribute, null);
+  assert.strictEqual(rc.effectiveStartTime(target), '21:00');
+  assert.match(cardText(target), /22:00からのため/u);
+  const bob = await click(userB, `participants_detail_${target.id}`);
+  assert.match(embedOf(bob.view).fields[0].value, /今すぐ〜22:00/u);
 });
 
 test.after(() => {
