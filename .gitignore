@@ -19,3 +19,7 @@ Thumbs.db
 
 # IDE config files (例: VS Code)
 .vscode/
+# 募集ボードのデータ・保存時の一時ファイル
+board_data.json
+*.tmp
+data/
