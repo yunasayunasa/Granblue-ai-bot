@@ -10,7 +10,7 @@ process.env.NODE_ENV = 'production';
 process.env.DATA_PATH = dataDir;
 delete process.env.MENTION_ROLE_ID;
 
-const { InteractionType, MessageFlags, PermissionsBitField } = require('discord.js');
+const { InteractionType, MessageFlags } = require('discord.js');
 const bot = require('../index');
 const rc = require('../recruitment');
 
@@ -243,7 +243,7 @@ test('スラッシュコマンドは日本語名と英語名の両方があり�
     assert.strictEqual(c.name, c.name.toLowerCase());
     assert.ok(c.description.length >= 1 && c.description.length <= 100);
   });
-  assert.strictEqual(commands.find(c => c.name === '募集ボード').default_member_permissions, String(PermissionsBitField.Flags.ManageMessages));
+  assert.strictEqual(commands.find(c => c.name === '募集ボード').default_member_permissions, undefined, '募集ボードは誰でも使える');
 });
 
 let realNow;
@@ -253,16 +253,12 @@ function restoreNow() { Date.now = realNow; }
 test('募集の流れ（作成→参加→変更→仮確定→枠編集→本確定→キャンセル繰り上げ→掃除）', async () => {
   realNow = Date.now;
 
-  // 募集ボードを設置
-  const boardSetup = await command(admin, '募集ボード');
+  // 募集ボードを設置（権限のない人でも設置できる）
+  const boardSetup = await command(outsider, '募集ボード');
   assert.match(boardSetup.view.content, /募集ボードを設置しました/u);
   const board = bot.boards()[GUILD];
   assert.ok(board && channel.store.get(board.messageId), 'ボードが設置される');
   assert.strictEqual(channel.lastMessageId, board.messageId);
-
-  // 権限のない人はボードを設置できない
-  const denied = await command(outsider, '募集ボード');
-  assert.match(denied.view.content, /権限が必要/u);
 
   const r = await createRecruitment(creator, '天元', '21:00');
   assert.strictEqual(r.status, 'active');

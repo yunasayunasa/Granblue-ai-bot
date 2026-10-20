@@ -418,8 +418,7 @@ function buildSlashCommands() {
     new SlashCommandBuilder().setName('募集ヘルプ').setDescription('ボットのヘルプを表示します'),
     new SlashCommandBuilder().setName('participants').setDescription('募集の参加者一覧を表示します (参加者一覧)'),
     new SlashCommandBuilder().setName('参加者一覧').setDescription('募集の参加者一覧を表示します'),
-    new SlashCommandBuilder().setName('募集ボード').setDescription('全募集をまとめた募集ボードをこのチャンネルに設置します')
-      .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages),
+    new SlashCommandBuilder().setName('募集ボード').setDescription('全募集をまとめた募集ボードをこのチャンネルに設置します'),
   ].map(command => command.toJSON());
 }
 
@@ -2085,10 +2084,6 @@ async function repostBoard(guildId, channel) {
 }
 
 async function setupBoard(interaction) {
-  const permissions = interaction.member.permissions;
-  if (!permissions?.has(PermissionsBitField.Flags.ManageMessages) && !isAdmin(interaction.member)) {
-    return interaction.reply({ content: '募集ボードの設置には「メッセージの管理」権限が必要です。', flags: EPHEMERAL });
-  }
   await interaction.deferReply({ flags: EPHEMERAL });
 
   const guildId = interaction.guildId;
@@ -2129,7 +2124,7 @@ async function showHelp(source) {
     .setDescription('天元・ルシゼロ等の高難易度レイド募集支援Bot')
     .setColor('#1ABC9C')
     .addFields(
-      { name: '🌟 コマンド', value: '`/募集`（`/recruit`）- 新規募集\n`/募集リスト`（`/list`）- 募集一覧\n`/参加者一覧`（`/participants`）- 参加者の詳細\n`/募集ヘルプ`（`/help`）- このヘルプ\n`/募集ボード` - 全募集をまとめたボードを設置（管理）' },
+      { name: '🌟 コマンド', value: '`/募集`（`/recruit`）- 新規募集\n`/募集リスト`（`/list`）- 募集一覧\n`/参加者一覧`（`/participants`）- 参加者の詳細\n`/募集ヘルプ`（`/help`）- このヘルプ\n`/募集ボード` - 全募集をまとめたボードをこのチャンネルに設置（前のボードは消えます）' },
       { name: '⚙️ 募集の流れ', value: '1. `/募集` でレイド・日付・時間を選ぶ（本人にだけ表示、「戻る」で修正可）。日付を複数選ぶと日ごとにまとめて作成\n2. **募集中**：参加のたびに割り振りを自動計算して（仮）表示\n3. **当日 8:00 に仮確定**：割り振りを固定し、調整用スレッドを作成。参加者同士で話し合いながら「枠を編集」で入れ替え可\n4. **開始1時間前に本確定**：割り振られた人にメンション' },
       { name: '🎮 参加', value: '募集カードの「参加・変更」か、ボードのメニューから。ボードで複数選ぶと同じ内容でまとめて参加できます。\n前回の内容が最初から入っているので、変更がなければ「このまま次へ」で進めます。参加後も同じボタンで内容を変更できます。\n得意な属性（◎）を選ぶと優先して割り振られます。早めに抜ける場合は確認画面で抜ける時間を選んでください。' },
       { name: '🔁 キャンセル・補欠', value: '- 割り振りは「入れる人を全員入れる」ように属性を自動調整します。あふれた人は補欠です。\n- 仮確定・本確定の後にキャンセルが出ると、入れる補欠が自動で繰り上がります（本確定後はメンションでお知らせ）。' },
