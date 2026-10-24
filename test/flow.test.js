@@ -107,12 +107,14 @@ function makeUser(id, name, admin = false) {
 }
 
 class FakeInteraction {
-  constructor(user, kind, { customId = null, values = [], commandName = null, remarks = '' } = {}) {
+  constructor(user, kind, { customId = null, values = [], commandName = null, remarks = '', users = null, members = null } = {}) {
     this.id = `i-${Math.random()}`;
     this.user = user;
     this.kind = kind;
     this.customId = customId;
     this.values = values;
+    this.users = users;
+    this.members = members;
     this.commandName = commandName;
     this.guildId = GUILD;
     this.channelId = CHANNEL;
@@ -128,6 +130,7 @@ class FakeInteraction {
   isChatInputCommand() { return this.kind === 'command'; }
   isButton() { return this.kind === 'button'; }
   isStringSelectMenu() { return this.kind === 'select'; }
+  isUserSelectMenu() { return this.kind === 'userSelect'; }
   isRepliable() { return true; }
   isFromMessage() { return true; }
   async reply(payload) { validate(payload); this.replied = true; this.calls.push(['reply', payload]); this.view = payload; }
@@ -157,6 +160,12 @@ async function run(user, kind, options) {
 const command = (user, commandName) => run(user, 'command', { commandName });
 const click = (user, customId) => run(user, 'button', { customId });
 const choose = (user, customId, values) => run(user, 'select', { customId, values });
+const chooseUser = (user, customId, target) => run(user, 'userSelect', {
+  customId,
+  values: [target.id],
+  users: new Map([[target.id, target]]),
+  members: new Map([[target.id, { id: target.id, displayName: target.username, user: target }]])
+});
 const submitModal = (user, customId, remarks) => run(user, 'modal', { customId, remarks });
 
 // ペイロードの中のボタン・メニューの customId 一覧
@@ -535,6 +544,136 @@ test('まとめて作成・まとめて参加・前回の内容・得意な属�
   assert.match(cardText(target), /22:00からのため/u);
   const bob = await click(userB, `participants_detail_${target.id}`);
   assert.match(embedOf(bob.view).fields[0].value, /今すぐ〜22:00/u);
+});
+
+test('代理登録・代理キャンセルは仮確定中だけ。参加者・募集者・管理者が使え、外された人は自分で戻れる', async () => {
+  const r = await createRecruitment(creator, '天元', '21:00');
+  await join(userA, r.id, ['火'], 'now');
+  const aliceAttrs = JSON.stringify(r.participants.find(p => p.userId === userA.id).attributesByRaid);
+  const aliceProfile = JSON.stringify(bot.userProfiles()[userA.id] || null);
+
+  const footer = () => embedOf(card(r).payload).footer.text;
+  const proxyButtons = () => customIds(card(r).payload).filter(id => id.startsWith('proxy_'));
+
+  // 募集中はボタンも操作も不可（参加していても）
+  assert.deepStrictEqual(proxyButtons(), []);
+  assert.ok(!footer().includes('編集・確定ボタンは募集者と管理者のみ'), 'フッターは誰が何をできるか分かる文言になっている');
+  assert.match(footer(), /募集の編集・確定は募集者と管理者のみ/);
+  assert.match(footer(), /仮確定中の枠編集・代理登録・代理キャンセルは参加者・募集者・管理者/);
+  const earlyRegister = await click(userA, `proxy_register_${r.id}`);
+  assert.match(earlyRegister.view.content, /仮確定中/);
+  const earlyCancel = await click(userA, `proxy_cancel_${r.id}`);
+  assert.match(earlyCancel.view.content, /仮確定中/);
+  const earlyPick = await chooseUser(userA, `proxy_register_pick_${r.id}`, outsider);
+  assert.match(earlyPick.view.content, /仮確定中/);
+  const earlyCancelPick = await choose(userA, `proxy_cancel_pick_${r.id}`, [outsider.id]);
+  assert.match(earlyCancelPick.view.content, /仮確定中/);
+
+  await click(creator, `close_recruitment_${r.id}`);
+  await click(creator, `confirm_close_${r.id}`);
+  assert.strictEqual(r.status, 'provisional');
+  const thread = channels.get(r.threadId);
+  assert.ok(thread, '調整用スレッドがある');
+  assert.ok(proxyButtons().includes(`proxy_register_${r.id}`));
+  assert.ok(proxyButtons().includes(`proxy_cancel_${r.id}`));
+  assert.match(cardText(r), /「代理登録」「代理キャンセル」は参加者・募集者・管理者が使えます/);
+
+  // 参加者でも募集者でも管理者でもない人は使えない
+  const deniedRegister = await click(outsider, `proxy_register_${r.id}`);
+  assert.ok(isEphemeral(deniedRegister.view));
+  assert.match(deniedRegister.view.content, /参加者・募集者・管理者のみ/);
+  const deniedCancel = await click(outsider, `proxy_cancel_${r.id}`);
+  assert.match(deniedCancel.view.content, /参加者・募集者・管理者のみ/);
+  const deniedPick = await chooseUser(outsider, `proxy_register_pick_${r.id}`, userB);
+  assert.match(deniedPick.view.content, /参加者・募集者・管理者のみ/);
+  const deniedCancelPick = await choose(outsider, `proxy_cancel_pick_${r.id}`, [userA.id]);
+  assert.match(deniedCancelPick.view.content, /参加者・募集者・管理者のみ/);
+
+  // 募集者（未参加）と管理者も開ける
+  assert.ok(!r.participants.some(p => p.userId === creator.id || p.userId === admin.id));
+  const creatorMenu = await click(creator, `proxy_register_${r.id}`);
+  assert.ok(isEphemeral(creatorMenu.view));
+  assert.ok(customIds(creatorMenu.view).includes(`proxy_register_pick_${r.id}`));
+  const adminMenu = await click(admin, `proxy_cancel_${r.id}`);
+  assert.ok(customIds(adminMenu.view).includes(`proxy_cancel_pick_${r.id}`));
+
+  // 自分自身と、参加済みの人の属性変更は代理登録ではできない
+  const selfPick = await chooseUser(userA, `proxy_register_pick_${r.id}`, userA);
+  assert.match(selfPick.view.content, /参加・変更/);
+  const menu = await click(userA, `proxy_register_${r.id}`);
+  assert.ok(customIds(menu.view).includes(`proxy_register_pick_${r.id}`));
+  assert.ok(!thread.memberIds.includes(outsider.id));
+  const form = await chooseUser(userA, `proxy_register_pick_${r.id}`, outsider);
+  assert.match(embedOf(form.view).title, /代理登録/);
+  assert.match(embedOf(form.view).description, /Eve/);
+  await fillJoinSteps(userA, r.id, form.view, { attrs: ['闇'], time: 'now' });
+  const before = thread.sent.length;
+  const registered = await click(userA, `confirm_direct_${r.id}`);
+  assert.match(registered.view.content, /Eveさんを代理登録しました/);
+  const eve = r.participants.find(p => p.userId === outsider.id);
+  assert.ok(eve, '代理登録された人が参加者になる');
+  assert.deepStrictEqual(eve.attributesByRaid, { 天元: ['闇'] });
+  assert.strictEqual(JSON.stringify(r.participants.find(p => p.userId === userA.id).attributesByRaid), aliceAttrs, '操作した人の申告は変わらない');
+  assert.strictEqual(JSON.stringify(bot.userProfiles()[userA.id] || null), aliceProfile, '操作した人の前回内容は変わらない');
+  assert.strictEqual(bot.userProfiles()[outsider.id], undefined, '相手の前回内容は代理登録では書き込まない');
+  assert.ok(thread.memberIds.includes(outsider.id), '新しい参加者は調整スレッドに入る');
+
+  const notes = thread.sent.slice(before);
+  assert.strictEqual(notes.length, 2, 'メンションと記録の2件');
+  const mention = notes.find(m => /さんがあなたを登録しました/.test(m.payload.content));
+  assert.ok(mention);
+  assert.match(mention.payload.content, /Aliceさんがあなたを登録しました/);
+  assert.deepStrictEqual(mention.payload.allowedMentions.users, [outsider.id]);
+  const log = notes.find(m => m !== mention);
+  assert.ok(log.payload.content.includes(userA.id) && log.payload.content.includes(outsider.id));
+  assert.match(log.payload.content, /代理登録/);
+  assert.ok(!log.payload.content.includes('\n'), 'スレッドの記録は1行');
+  assert.deepStrictEqual(log.payload.allowedMentions.users, []);
+
+  const duplicate = await chooseUser(userA, `proxy_register_pick_${r.id}`, outsider);
+  assert.match(duplicate.view.content, /既にこの募集に参加しています/);
+
+  // 代理キャンセル。相手にメンションし、スレッドに1行残す
+  const cancelMenu = await click(userA, `proxy_cancel_${r.id}`);
+  assert.ok(customIds(cancelMenu.view).includes(`proxy_cancel_pick_${r.id}`));
+  const ask = await choose(userA, `proxy_cancel_pick_${r.id}`, [outsider.id]);
+  assert.match(embedOf(ask.view).description, /Eve/);
+  assert.match(embedOf(ask.view).description, /キャンセルしますか/);
+  const beforeCancel = thread.sent.length;
+  const cancelled = await click(userA, `proxy_cancel_do_${r.id}_${outsider.id}`);
+  assert.match(cancelled.view.content, /Eveさんの参加をキャンセルしました/);
+  assert.ok(!r.participants.some(p => p.userId === outsider.id));
+  const cancelNotes = thread.sent.slice(beforeCancel);
+  assert.strictEqual(cancelNotes.length, 2);
+  const cancelMention = cancelNotes.find(m => /あなたの参加をキャンセルしました/.test(m.payload.content));
+  assert.ok(cancelMention);
+  assert.match(cancelMention.payload.content, /Aliceさんがあなたの参加をキャンセルしました/);
+  assert.deepStrictEqual(cancelMention.payload.allowedMentions.users, [outsider.id]);
+  const cancelLog = cancelNotes.find(m => m !== cancelMention);
+  assert.ok(cancelLog.payload.content.includes(userA.id) && cancelLog.payload.content.includes(outsider.id));
+  assert.match(cancelLog.payload.content, /キャンセル/);
+  assert.ok(!cancelLog.payload.content.includes('\n'));
+  assert.deepStrictEqual(cancelLog.payload.allowedMentions.users, []);
+
+  // 代理で外された人は、自分の「参加・変更」から戻れる
+  const rejoined = await join(outsider, r.id, ['風'], 'now');
+  assert.match(rejoined.view.content, /参加を受け付けました/);
+  assert.deepStrictEqual(r.participants.find(p => p.userId === outsider.id).attributesByRaid, { 天元: ['風'] });
+
+  await click(creator, `finalize_recruitment_${r.id}`);
+  await click(creator, `confirm_finalize_${r.id}`);
+  assert.strictEqual(r.status, 'finalized');
+  assert.deepStrictEqual(proxyButtons(), []);
+  const lateRegister = await click(userA, `proxy_register_${r.id}`);
+  assert.match(lateRegister.view.content, /仮確定中/);
+  const lateCancel = await click(userA, `proxy_cancel_${r.id}`);
+  assert.match(lateCancel.view.content, /仮確定中/);
+  const lateDo = await click(userA, `proxy_cancel_do_${r.id}_${outsider.id}`);
+  assert.match(lateDo.view.content, /仮確定中/);
+
+  const help = await command(userA, '募集ヘルプ');
+  assert.match(embedOf(help.view).fields.map(f => f.value).join('\n'), /代理登録/);
+  assert.match(embedOf(help.view).fields.map(f => f.value).join('\n'), /代理キャンセル/);
 });
 
 test.after(() => {
