@@ -389,6 +389,7 @@ function cardDescription(r) {
   } else if (key === 'provisional') {
     const fin = finalizeAtMs(r);
     lines.push(`🟡 **仮確定**｜本確定 ${discordTime(fin, 't')}（${discordTime(fin, 'R')}）までは「枠を編集」で入れ替えできます`);
+    lines.push('「代理登録」「代理キャンセル」は参加者・募集者・管理者が使えます');
     if (r.lastEditedBy) lines.push(`✏️ 最終編集 <@${r.lastEditedBy}>`);
   } else if (key === 'finalized') {
     lines.push('🏁 **本確定**');
@@ -466,7 +467,8 @@ function provisionalNotice(r) {
   return truncate([
     `🟡 **仮確定** ${headline(r)}`,
     compactSlots(r),
-    `本確定は ${discordTime(fin, 't')}（開始1時間前）です。それまでは募集の「枠を編集」から入れ替えできます。`
+    `本確定は ${discordTime(fin, 't')}（開始1時間前）です。それまでは募集の「枠を編集」から入れ替えできます。`,
+    '「代理登録」「代理キャンセル」は参加者・募集者・管理者が使えます。'
   ].join('\n'), 2000);
 }
 

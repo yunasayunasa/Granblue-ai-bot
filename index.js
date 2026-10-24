@@ -6,6 +6,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   StringSelectMenuBuilder,
+  UserSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -144,6 +145,11 @@ function canEditSlots(interaction, recruitment) {
   return canManage(interaction, recruitment) || recruitment.participants.some(p => p.userId === interaction.user.id);
 }
 
+// 代理登録・代理キャンセルも、枠の編集と同じ範囲
+function canProxy(interaction, recruitment) {
+  return canEditSlots(interaction, recruitment);
+}
+
 // 完全なIDでも、表示用の短いIDでも募集を探す
 function findRecruitment(idOrShort) {
   if (activeRecruitments.has(idOrShort)) return activeRecruitments.get(idOrShort);
@@ -182,6 +188,14 @@ function selectMenu(customId, placeholder, options, minValues = 1, maxValues = 1
     .addOptions(options)
     .setMinValues(minValues)
     .setMaxValues(maxValues);
+}
+
+function userSelect(customId, placeholder) {
+  return new UserSelectMenuBuilder()
+    .setCustomId(customId)
+    .setPlaceholder(placeholder)
+    .setMinValues(1)
+    .setMaxValues(1);
 }
 
 // ボタンを1行5個ずつに分ける
@@ -556,6 +570,8 @@ async function handleInteraction(interaction) {
       await handleButtonInteraction(interaction);
     } else if (interaction.isStringSelectMenu()) {
       await handleSelectMenuInteraction(interaction);
+    } else if (interaction.isUserSelectMenu?.()) {
+      await handleUserSelectInteraction(interaction);
     } else if (interaction.type === InteractionType.ModalSubmit) {
       await handleModalSubmit(interaction);
     }
@@ -660,6 +676,15 @@ async function handleButtonInteraction(interaction) {
   if ((rest = after(customId, 'cancel_participation_')) !== null) return askCancelParticipation(interaction, rest);
   if ((rest = after(customId, 'participants_detail_')) !== null) return showParticipantDetail(interaction, rest);
 
+  // --- 代理登録・代理キャンセル（仮確定中。長い prefix を先に見る） ---
+  if ((rest = after(customId, 'proxy_cancel_do_')) !== null) {
+    const sep = rest.indexOf('_');
+    if (sep === -1) return interaction.reply({ content: 'このボタンは現在処理できません。', flags: EPHEMERAL });
+    return executeProxyCancel(interaction, rest.slice(0, sep), rest.slice(sep + 1));
+  }
+  if ((rest = after(customId, 'proxy_register_')) !== null) return showProxyRegister(interaction, rest);
+  if ((rest = after(customId, 'proxy_cancel_')) !== null) return showProxyCancel(interaction, rest);
+
   // --- 仮確定・本確定 ---
   if ((rest = after(customId, 'close_recruitment_')) !== null) return askAdvance(interaction, rest, 'provisional');
   if ((rest = after(customId, 'finalize_recruitment_')) !== null) return askAdvance(interaction, rest, 'final');
@@ -728,6 +753,9 @@ async function handleSelectMenuInteraction(interaction) {
   if ((rest = after(customId, 'time_availability_select_')) !== null) return selectJoinTime(interaction, rest, value);
   if ((rest = after(customId, 'join_leave_')) !== null) return selectJoinLeave(interaction, rest, value);
 
+  // --- 代理キャンセル（仮確定中） ---
+  if ((rest = after(customId, 'proxy_cancel_pick_')) !== null) return askProxyCancel(interaction, rest, value);
+
   // --- 枠の編集 ---
   if ((rest = after(customId, 'slot_pick_')) !== null) return showSlotCandidates(interaction, rest, value);
   if ((rest = after(customId, 'slot_assign_')) !== null) {
@@ -755,6 +783,13 @@ async function handleSelectMenuInteraction(interaction) {
   }
 
   console.warn(`未処理のセレクトメニューID: ${customId}`);
+  return interaction.update({ content: 'このメニューは現在処理できません。', components: [] });
+}
+
+async function handleUserSelectInteraction(interaction) {
+  const rest = after(interaction.customId, 'proxy_register_pick_');
+  if (rest !== null) return beginProxyRegister(interaction, rest, interaction.values[0]);
+  console.warn(`未処理のユーザー選択ID: ${interaction.customId}`);
   return interaction.update({ content: 'このメニューは現在処理できません。', components: [] });
 }
 
@@ -1006,6 +1041,12 @@ function cardComponents(recruitment) {
       button(`cancel_participation_${id}`, '参加キャンセル'),
       button(`participants_detail_${id}`, '参加者詳細')
     )];
+    if (key === 'provisional') {
+      rows.push(row(
+        button(`proxy_register_${id}`, '代理登録'),
+        button(`proxy_cancel_${id}`, '代理キャンセル')
+      ));
+    }
     rows.push(key === 'active'
       ? row(button(`edit_recruitment_${id}`, '募集を編集'), button(`close_recruitment_${id}`, '今すぐ仮確定', ButtonStyle.Danger))
       : row(button(`edit_slots_${id}`, '枠を編集', ButtonStyle.Primary), button(`edit_recruitment_${id}`, '募集を編集'), button(`finalize_recruitment_${id}`, '今すぐ本確定', ButtonStyle.Danger)));
@@ -1018,13 +1059,19 @@ function cardComponents(recruitment) {
   return [];
 }
 
+function cardFooter(recruitment) {
+  const idText = `ID: ${shortId(recruitment.id)}`;
+  if (!isOpen(recruitment)) return idText;
+  return `${idText}｜募集の編集・確定は募集者と管理者のみ｜仮確定中の枠編集・代理登録・代理キャンセルは参加者・募集者・管理者`;
+}
+
 function buildCardMessage(recruitment) {
   const key = statusKey(recruitment);
   const embed = new EmbedBuilder()
     .setTitle(cardTitle(recruitment))
     .setDescription(cardDescription(recruitment))
     .setColor(CARD_COLORS[key] || '#95A5A6')
-    .setFooter({ text: `ID: ${shortId(recruitment.id)}${isOpen(recruitment) ? '｜編集・確定ボタンは募集者と管理者のみ' : ''}` });
+    .setFooter({ text: cardFooter(recruitment) });
   return {
     content: recruitment.mentionRoleId ? `<@&${recruitment.mentionRoleId}>` : '',
     embeds: [embed],
@@ -1243,10 +1290,12 @@ function placementText(recruitment, participant, prospective) {
 
 // 確認画面の「割り振りの見込み」（実際に入れた場合を試算する）
 function joinPreviewLines(state, interaction) {
+  const subjectId = state.proxyFor?.userId || interaction.user.id;
+  const subjectName = state.proxyFor?.username || displayNameOf(interaction);
   return joinTargets(state).map(recruitment => {
     const simulated = JSON.parse(JSON.stringify(recruitment));
-    const existing = simulated.participants.find(p => p.userId === interaction.user.id);
-    const data = buildParticipantData(simulated, state, interaction.user.id, displayNameOf(interaction), remarksFor(state, existing));
+    const existing = simulated.participants.find(p => p.userId === subjectId);
+    const data = buildParticipantData(simulated, state, subjectId, subjectName, remarksFor(state, existing));
     const text = placementText(simulated, applyParticipation(simulated, data), true);
     return state.mode === 'bulk' ? `・${formatDateShort(recruitment.date)} ${raidLabel(recruitment)}：${text}` : text;
   });
@@ -1257,10 +1306,14 @@ function joinStepPayload(state, interaction) {
   const id = state.mode === 'bulk' ? BULK_ID : state.recruitmentId;
   const single = state.mode === 'bulk' ? null : targets[0];
   const embed = new EmbedBuilder()
-    .setTitle(single ? (state.isEdit ? '✏️ 参加内容の変更' : '🎮 参加申込') : `🎮 まとめて参加（${targets.length}件）`)
-    .setColor('#2ECC71');
+    .setTitle(state.proxyFor ? '🤝 代理登録' : (single ? (state.isEdit ? '✏️ 参加内容の変更' : '🎮 参加申込') : `🎮 まとめて参加（${targets.length}件）`))
+    .setColor(state.proxyFor ? CARD_COLORS.provisional : '#2ECC71');
   const summary = single ? headline(single) : targets.map(r => `・${headline(r)}`).join('\n');
-  const prefilledNote = state.prefilled && !state.isEdit ? '\n（前回の内容を入れてあります。そのままでよければ「このまま次へ」）' : '';
+  const prefilledNote = state.prefilled && !state.isEdit
+    ? (state.proxyFor
+      ? `\n（${state.proxyFor.username}さんの前回の内容を入れてあります。そのままでよければ「このまま次へ」）`
+      : '\n（前回の内容を入れてあります。そのままでよければ「このまま次へ」）')
+    : '';
   const nextButton = button(`join_next_${id}`, 'このまま次へ ▶', ButtonStyle.Primary);
   const components = [];
   const navButtons = [];
@@ -1311,7 +1364,8 @@ function joinStepPayload(state, interaction) {
     const joinedSome = state.mode === 'bulk' && targets.some(r => r.participants.some(p => p.userId === interaction.user.id));
     const remarksText = state.mode === 'bulk' && !state.remarksTouched ? 'なし（参加済みの募集は今の備考のまま）' : (state.remarks || 'なし');
     const note = targets.some(r => r.status === 'active') ? '\n（ほかの人の参加・キャンセルで変わることがあります）' : '';
-    embed.setDescription(`${summary}\n\nこの内容で${state.isEdit ? '変更' : '申し込み'}ます。よろしければ確定してください。${joinedSome ? '\n参加済みの募集は、この内容に変更されます。' : ''}`)
+    const verb = state.proxyFor ? `${state.proxyFor.username}さんを登録します` : (state.isEdit ? '変更します' : '申し込みます');
+    embed.setDescription(`${summary}\n\nこの内容で${verb}。よろしければ確定してください。${joinedSome ? '\n参加済みの募集は、この内容に変更されます。' : ''}`)
       .addFields(
         { name: '担当できる属性', value: truncate(selection, 1024), inline: false },
         { name: '参加できる時間', value: timeLabel(state.timeAvailability, state.leaveTime), inline: true },
@@ -1329,6 +1383,10 @@ function joinStepPayload(state, interaction) {
       button(`confirm_direct_${id}`, hasRemarks || state.mode === 'bulk' ? '確定' : '確定（備考なし）', ButtonStyle.Success),
       button(`open_remarks_modal_${id}`, hasRemarks ? '📝 備考を変えて確定' : '📝 備考を書いて確定', ButtonStyle.Primary)
     );
+  }
+
+  if (state.proxyFor && embed.data.description) {
+    embed.setDescription(`🤝 **${state.proxyFor.username}** さんの代理登録です。\n${embed.data.description}`);
   }
 
   navButtons.push(cancelButton('cancel_join'));
@@ -1497,25 +1555,40 @@ async function showRemarksModal(interaction, recruitmentId) {
 async function commitJoin(interaction, recruitmentId) {
   const state = getJoinState(interaction, recruitmentId);
   if (!state || !state.timeAvailability) return interaction.editReply(STALE_JOIN_MESSAGE);
+  if (state.proxyFor) {
+    const recruitment = activeRecruitments.get(state.recruitmentId);
+    const reason = proxyBlockReason(interaction, recruitment);
+    if (reason) return interaction.editReply({ content: reason, embeds: [], components: [] });
+    if (recruitment.participants.some(p => p.userId === state.proxyFor.userId)) {
+      return interaction.editReply({ content: 'その人は既にこの募集に参加しています。属性や時間の変更は、本人の「参加・変更」から行えます。', embeds: [], components: [] });
+    }
+  }
   const targets = joinTargets(state);
   if (targets.length === 0) return interaction.editReply(CLOSED_JOIN_MESSAGE);
 
-  let member = interaction.member;
-  if (!member?.displayName) member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-  const username = member?.displayName || interaction.user.username;
+  const subjectId = state.proxyFor?.userId || interaction.user.id;
+  let username = state.proxyFor?.username;
+  if (!username) {
+    let member = interaction.member;
+    if (!member?.displayName) member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    username = member?.displayName || interaction.user.username;
+  }
 
   const results = targets.map(recruitment => {
-    const existing = recruitment.participants.find(p => p.userId === interaction.user.id);
-    const me = applyParticipation(recruitment, buildParticipantData(recruitment, state, interaction.user.id, username, remarksFor(state, existing)));
+    const existing = recruitment.participants.find(p => p.userId === subjectId);
+    const me = applyParticipation(recruitment, buildParticipantData(recruitment, state, subjectId, username, remarksFor(state, existing)));
     return { recruitment, me, wasJoined: Boolean(existing) };
   });
   tempUserData.delete(interaction.user.id);
-  rememberChoice(interaction.user.id, state);
+  if (!state.proxyFor) rememberChoice(interaction.user.id, state);
   saveRecruitmentData();
   debugLog('ConfirmParticipation', `${username} → ${results.map(({ recruitment, wasJoined }) => `${recruitment.id}${wasJoined ? '(変更)' : ''}`).join(', ')}`);
 
   let content;
-  if (state.mode === 'bulk') {
+  if (state.proxyFor) {
+    const { recruitment, me } = results[0];
+    content = `✅ ${username}さんを代理登録しました。\n${placementText(recruitment, me, false)}`;
+  } else if (state.mode === 'bulk') {
     const lines = results.map(({ recruitment, me }) => `・${formatDateShort(recruitment.date)} ${raidLabel(recruitment)}：${placementText(recruitment, me, false)}`);
     const skipped = state.recruitmentIds.length - targets.length;
     content = `✅ ${results.length}件の募集に参加しました！\n${lines.join('\n')}${skipped > 0 ? `\n⚠️ ${skipped}件は受付が終わっていたため参加していません。` : ''}`;
@@ -1526,7 +1599,8 @@ async function commitJoin(interaction, recruitmentId) {
   await interaction.editReply({ content: truncate(content, 2000), embeds: [], components: [] });
   for (const { recruitment } of results) {
     await updateRecruitmentMessage(recruitment);
-    await addToThread(recruitment, interaction.user.id);
+    await addToThread(recruitment, subjectId);
+    if (state.proxyFor) await announceProxy(recruitment, interaction, state.proxyFor, 'register');
   }
 }
 
@@ -1585,6 +1659,206 @@ async function cancelParticipation(interaction, recruitmentId) {
       await postNotice(recruitment, `⚠️ ${who(removed)} さんが参加キャンセルしたため、${ATTRIBUTE_EMOJI[removed.assignedAttribute]}【${removed.assignedAttribute}】が空きになりました（募集者: <@${recruitment.creator}>）`, [recruitment.creator]);
     }
   }
+}
+
+//==========================================================================
+// 代理登録・代理キャンセル（仮確定中だけ。参加者・募集者・管理者）
+// 参加済みの人の属性・時間は変えない。登録時に一度だけ入力する。
+//==========================================================================
+
+function proxyBlockReason(interaction, recruitment) {
+  if (!recruitment) return 'この募集は存在しないか削除されました。';
+  if (recruitment.status !== 'provisional') return '代理登録・代理キャンセルは仮確定中（当日8:00〜本確定まで）のみできます。';
+  if (!canProxy(interaction, recruitment)) return 'この募集の参加者・募集者・管理者のみ操作できます。';
+  if (Date.now() >= startAtMs(recruitment)) return '開始時間を過ぎているため、操作できません。';
+  return null;
+}
+
+function readDisplayName(entity) {
+  if (!entity) return null;
+  return entity.displayName || entity.nick || entity.globalName || entity.username || entity.user?.globalName || entity.user?.username || null;
+}
+
+async function resolveProxyTarget(interaction, userId) {
+  const member = interaction.members?.get?.(userId) || null;
+  const user = member?.user || interaction.users?.get?.(userId) || null;
+  if (user?.bot || member?.user?.bot) return { error: 'ボットは登録できません。' };
+  let username = readDisplayName(member) || readDisplayName(user);
+  if (!username) {
+    const fetched = await interaction.guild?.members?.fetch?.(userId).catch(() => null);
+    const fetchedId = fetched?.id || fetched?.user?.id;
+    if (fetched && fetchedId === userId) {
+      if (fetched.user?.bot) return { error: 'ボットは登録できません。' };
+      username = readDisplayName(fetched);
+    }
+  }
+  return { userId, username: username || 'メンバー' };
+}
+
+// まだ参加していない人向けの入力状態（代理登録で使う。本人の参加画面とは分けておく）
+function newJoinState(recruitment, subjectUserId) {
+  const state = {
+    mode: 'single',
+    recruitmentId: recruitment.id,
+    isEdit: false,
+    needsRaidStep: recruitment.type === FLEX_RAID,
+    step: '',
+    selectedRaids: [],
+    attributesByRaid: {},
+    preferredByRaid: {},
+    timeAvailability: null,
+    leaveTime: null,
+    remarks: '',
+    prefilled: false,
+    updatedAt: Date.now()
+  };
+  if (recruitment.type !== FLEX_RAID) {
+    state.selectedRaids = [recruitment.type];
+  } else {
+    const remembered = userProfiles[subjectUserId]?.flexRaids || [];
+    state.selectedRaids = remembered.includes(ANY_RAID) ? [ANY_RAID] : remembered.filter(raid => selectableRaids().includes(raid));
+    if (state.selectedRaids.length > 0) state.prefilled = true;
+  }
+  prefillFromProfile(state, subjectUserId);
+  state.step = joinSteps(state)[0];
+  return state;
+}
+
+async function announceProxy(recruitment, interaction, target, kind) {
+  const actorName = displayNameOf(interaction);
+  const registered = kind === 'register';
+  const sentence = registered
+    ? `${actorName}さんがあなたを登録しました`
+    : `${actorName}さんがあなたの参加をキャンセルしました`;
+  const targetId = target.userId;
+  const ping = /^\d+$/.test(String(targetId)) ? [targetId] : [];
+  const notice = ping.length ? `<@${targetId}> ${sentence}` : `${target.username}さん、${sentence}`;
+  const log = registered
+    ? `<@${interaction.user.id}> さんが ${who(target)} さんを代理登録しました`
+    : `<@${interaction.user.id}> さんが ${who(target)} さんの参加をキャンセルしました`;
+  await postNotice(recruitment, notice, ping);
+  await postNotice(recruitment, log, []);
+}
+
+async function showProxyRegister(interaction, recruitmentId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  const reason = proxyBlockReason(interaction, recruitment);
+  if (reason) return interaction.reply({ content: reason, flags: EPHEMERAL });
+  const embed = new EmbedBuilder()
+    .setTitle('🤝 代理登録')
+    .setDescription(`${headline(recruitment)}\n\n登録するメンバーを選んでください。\n選んだあと、その人の属性と参加時間を入力します。\n登録すると相手にメンションし、調整スレッドにも残します。`)
+    .setColor(CARD_COLORS.provisional);
+  return interaction.reply({
+    embeds: [embed],
+    components: [
+      row(userSelect(`proxy_register_pick_${recruitmentId}`, '登録するメンバーを選択')),
+      row(closeButton())
+    ],
+    flags: EPHEMERAL
+  });
+}
+
+async function beginProxyRegister(interaction, recruitmentId, targetId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  const reason = proxyBlockReason(interaction, recruitment);
+  if (reason) return interaction.update({ content: reason, embeds: [], components: [] });
+  if (!targetId) return interaction.update({ content: '登録するメンバーを選んでください。', embeds: [], components: [] });
+  if (targetId === interaction.user.id) {
+    return interaction.update({ content: '自分の参加は「参加・変更」から行ってください。', embeds: [], components: [] });
+  }
+  if (recruitment.participants.some(p => p.userId === targetId)) {
+    return interaction.update({ content: 'その人は既にこの募集に参加しています。属性や時間の変更は、本人の「参加・変更」から行えます。', embeds: [], components: [] });
+  }
+  const resolved = await resolveProxyTarget(interaction, targetId);
+  if (resolved.error) return interaction.update({ content: resolved.error, embeds: [], components: [] });
+
+  const state = newJoinState(recruitment, resolved.userId);
+  state.proxyFor = { userId: resolved.userId, username: resolved.username };
+  tempUserData.set(interaction.user.id, state);
+  return interaction.update(joinStepPayload(state, interaction));
+}
+
+async function showProxyCancel(interaction, recruitmentId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  const reason = proxyBlockReason(interaction, recruitment);
+  if (reason) return interaction.reply({ content: reason, flags: EPHEMERAL });
+  const others = recruitment.participants.filter(p => p.userId !== interaction.user.id);
+  if (others.length === 0) {
+    return interaction.reply({ content: 'キャンセルできる他の参加者がいません。', flags: EPHEMERAL });
+  }
+  const raid = recruitment.finalRaidType || recruitment.type;
+  const options = others.slice(0, 25).map(p => {
+    let place = '補欠';
+    if (p.assignedAttribute) place = `${ATTRIBUTE_EMOJI[p.assignedAttribute]}【${p.assignedAttribute}】`;
+    else if (attributesFor(p, raid).length === 0) place = '対象外';
+    return {
+      label: truncate(p.username || p.userId, 100),
+      value: p.userId,
+      description: truncate(place, 100)
+    };
+  });
+  const extra = others.length > 25 ? '\n（先頭25人まで表示しています）' : '';
+  const embed = new EmbedBuilder()
+    .setTitle('🚫 代理キャンセル')
+    .setDescription(`${headline(recruitment)}\n\n参加をキャンセルする人を選んでください。\nキャンセルすると相手にメンションし、調整スレッドにも残します。${extra}`)
+    .setColor(CARD_COLORS.provisional);
+  return interaction.reply({
+    embeds: [embed],
+    components: [
+      row(selectMenu(`proxy_cancel_pick_${recruitmentId}`, 'キャンセルする参加者を選択', options)),
+      row(closeButton())
+    ],
+    flags: EPHEMERAL
+  });
+}
+
+async function askProxyCancel(interaction, recruitmentId, targetId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  const reason = proxyBlockReason(interaction, recruitment);
+  if (reason) return interaction.update({ content: reason, embeds: [], components: [] });
+  if (targetId === interaction.user.id) {
+    return interaction.update({ content: '自分のキャンセルは「参加キャンセル」から行ってください。', embeds: [], components: [] });
+  }
+  const target = recruitment.participants.find(p => p.userId === targetId);
+  if (!target) return interaction.update({ content: 'その人はこの募集に参加していません。', embeds: [], components: [] });
+
+  let note = '';
+  if (target.assignedAttribute) {
+    note = `\n${ATTRIBUTE_EMOJI[target.assignedAttribute]}【${target.assignedAttribute}】は空きになり、入れる補欠の人がいれば繰り上がります。`;
+  }
+  const embed = new EmbedBuilder()
+    .setTitle('🚫 代理キャンセルの確認')
+    .setDescription(`${headline(recruitment)}\n\n**${target.username}** さんの参加をキャンセルしますか？${note}\nキャンセルされた人は、あとから「参加・変更」で自分で参加し直せます。`)
+    .setColor('#E74C3C');
+  return interaction.update({
+    content: '',
+    embeds: [embed],
+    components: [row(
+      button(`proxy_cancel_do_${recruitmentId}_${targetId}`, 'キャンセルする', ButtonStyle.Danger),
+      button('dismiss', 'やめる')
+    )]
+  });
+}
+
+async function executeProxyCancel(interaction, recruitmentId, targetId) {
+  const recruitment = activeRecruitments.get(recruitmentId);
+  const reason = proxyBlockReason(interaction, recruitment);
+  if (reason) return interaction.update({ content: reason, embeds: [], components: [] });
+  if (targetId === interaction.user.id) {
+    return interaction.update({ content: '自分のキャンセルは「参加キャンセル」から行ってください。', embeds: [], components: [] });
+  }
+  const index = recruitment.participants.findIndex(p => p.userId === targetId);
+  if (index === -1) return interaction.update({ content: 'その人はこの募集に参加していません。', embeds: [], components: [] });
+
+  await interaction.deferUpdate();
+  const [removed] = recruitment.participants.splice(index, 1);
+  if (removed.assignedAttribute) fillEmptySlots(recruitment);
+  saveRecruitmentData();
+  debugLog('ProxyCancel', `${displayNameOf(interaction)} が ${removed.username} をキャンセル (${recruitmentId})`);
+
+  await interaction.editReply({ content: `✅ ${removed.username}さんの参加をキャンセルしました。`, embeds: [], components: [] });
+  await updateRecruitmentMessage(recruitment);
+  await announceProxy(recruitment, interaction, removed, 'cancel');
 }
 
 //==========================================================================
@@ -2125,9 +2399,9 @@ async function showHelp(source) {
     .setColor('#1ABC9C')
     .addFields(
       { name: '🌟 コマンド', value: '`/募集`（`/recruit`）- 新規募集\n`/募集リスト`（`/list`）- 募集一覧\n`/参加者一覧`（`/participants`）- 参加者の詳細\n`/募集ヘルプ`（`/help`）- このヘルプ\n`/募集ボード` - 全募集をまとめたボードをこのチャンネルに設置（前のボードは消えます）' },
-      { name: '⚙️ 募集の流れ', value: '1. `/募集` でレイド・日付・時間を選ぶ（本人にだけ表示、「戻る」で修正可）。日付を複数選ぶと日ごとにまとめて作成\n2. **募集中**：参加のたびに割り振りを自動計算して（仮）表示\n3. **当日 8:00 に仮確定**：割り振りを固定し、調整用スレッドを作成。参加者同士で話し合いながら「枠を編集」で入れ替え可\n4. **開始1時間前に本確定**：割り振られた人にメンション' },
-      { name: '🎮 参加', value: '募集カードの「参加・変更」か、ボードのメニューから。ボードで複数選ぶと同じ内容でまとめて参加できます。\n前回の内容が最初から入っているので、変更がなければ「このまま次へ」で進めます。参加後も同じボタンで内容を変更できます。\n得意な属性（◎）を選ぶと優先して割り振られます。早めに抜ける場合は確認画面で抜ける時間を選んでください。' },
-      { name: '🔁 キャンセル・補欠', value: '- 割り振りは「入れる人を全員入れる」ように属性を自動調整します。あふれた人は補欠です。\n- 仮確定・本確定の後にキャンセルが出ると、入れる補欠が自動で繰り上がります（本確定後はメンションでお知らせ）。' },
+      { name: '⚙️ 募集の流れ', value: '1. `/募集` でレイド・日付・時間を選ぶ（本人にだけ表示、「戻る」で修正可）。日付を複数選ぶと日ごとにまとめて作成\n2. **募集中**：参加のたびに割り振りを自動計算して（仮）表示\n3. **当日 8:00 に仮確定**：割り振りを固定し、調整用スレッドを作成。参加者同士で話し合いながら「枠を編集」で入れ替え可（代理登録・代理キャンセルも同じ人が使えます）\n4. **開始1時間前に本確定**：割り振られた人にメンション' },
+      { name: '🎮 参加', value: '募集カードの「参加・変更」か、ボードのメニューから。ボードで複数選ぶと同じ内容でまとめて参加できます。\n前回の内容が最初から入っているので、変更がなければ「このまま次へ」で進めます。参加後も同じボタンで内容を変更できます。\n得意な属性（◎）を選ぶと優先して割り振られます。早めに抜ける場合は確認画面で抜ける時間を選んでください。\n仮確定中は、参加者・募集者・管理者が「代理登録」でほかのメンバーを追加できます。' },
+      { name: '🔁 キャンセル・補欠', value: '- 割り振りは「入れる人を全員入れる」ように属性を自動調整します。あふれた人は補欠です。\n- 仮確定・本確定の後にキャンセルが出ると、入れる補欠が自動で繰り上がります（本確定後はメンションでお知らせ）。\n- 仮確定中の「代理キャンセル」では、参加者・募集者・管理者がほかの参加者を外せます。外された人は「参加・変更」から再度参加できます。' },
       { name: '🛠️ 募集者', value: '「募集を編集」で日付・時間・レイドの変更や中止ができます（参加者にお知らせ）。\n「今すぐ仮確定」「今すぐ本確定」で予定より早く確定することもできます。' },
       { name: '🔧 管理者用コマンド', value: '`!募集削除 [ID]`\n`!IDリスト`\n`!募集確認 [ID]` / `!募集詳細確認`\n`!テストモード開始` / `!テストモード終了`\n`!テスト参加者追加 [ID] [人数]`' }
     )
