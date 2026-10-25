@@ -676,6 +676,37 @@ test('代理登録・代理キャンセルは仮確定中だけ。参加者・�
   assert.match(embedOf(help.view).fields.map(f => f.value).join('\n'), /代理キャンセル/);
 });
 
+test('仮確定後の参加：入っている人をずらせば入れるなら玉突きで入れ、ずらした人をお知らせする', async () => {
+  const r = await createRecruitment(creator, '天元', '21:00');
+  await join(userA, r.id, ['火', '水', '土', '風', '光', '闇'], 'now');
+  await join(userB, r.id, ['火', '闇'], 'now', { prefs: ['火', '闇'] });
+  await join(userC, r.id, ['土'], 'now');
+  await join(userD, r.id, ['風'], 'now');
+  await join(admin, r.id, ['水'], 'now');
+  await click(creator, `close_recruitment_${r.id}`);
+  await click(creator, `confirm_close_${r.id}`);
+  assert.strictEqual(r.status, 'provisional');
+  const byId = id => r.participants.find(p => p.userId === id);
+  byId(userA.id).assignedAttribute = '火';
+  byId(userB.id).assignedAttribute = '闇';
+  const thread = channels.get(r.threadId);
+
+  const done = await join(outsider, r.id, ['闇'], 'now');
+  assert.match(done.view.content, /【闇】/u);
+  assert.deepStrictEqual([userA, userB, outsider].map(u => byId(u.id).assignedAttribute), ['光', '火', '闇']);
+  const notice = thread.sent[thread.sent.length - 1];
+  assert.match(notice.payload.content, /枠を入れ替えました/u);
+  assert.match(notice.payload.content, /<@100000000000000011> さん：🔥【火】→ ✨【光】/u);
+  assert.match(notice.payload.content, /<@100000000000000012> さん：🌑【闇】→ 🔥【火】/u);
+  assert.deepStrictEqual(notice.payload.allowedMentions.users, [], '仮確定中はメンションしない');
+
+  // もう1人闇しかできない人が来ても補欠で、誰も動かない
+  const sentBefore = thread.sent.length;
+  await join(creator, r.id, ['闇'], 'now');
+  assert.strictEqual(byId(creator.id).assignedAttribute, null);
+  assert.ok(thread.sent.slice(sentBefore).every(m => !/枠を入れ替えました/u.test(m.payload.content || '')));
+});
+
 test.after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref(); // ボード更新のタイマーを待たずに終了
