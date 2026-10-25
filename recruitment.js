@@ -282,7 +282,10 @@ function selectMembers(r, raid) {
 // 募集中の自動割り振り（参加・キャンセルのたびに計算し直す）
 function autoAssign(r, raid = decideRaid(r)) {
   const result = raid ? arrangeMembers(selectMembers(r, raid), raid, ATTRIBUTES) : {};
-  r.participants.forEach(p => { p.assignedAttribute = result[p.userId] || null; });
+  r.participants.forEach(p => {
+    p.assignedAttribute = result[p.userId] || null;
+    delete p.manualSlot;
+  });
   r.finalRaidType = raid;
   r.finalTime = computeStartTime(r);
 }
@@ -293,19 +296,45 @@ function fitsStart(r, p) {
   return fromHourOf(p) <= start && availableAt(p, start);
 }
 
-// 仮確定・本確定後に空いた枠を補欠から埋める（手動で入れ替えた人はそのまま）。繰り上がった人を返す。
+// 仮確定・本確定後に空いた枠を補欠から埋める。繰り上がった人を返す。
+// 補欠が空き枠の属性を持っていなくても、入っている人を申告した別の属性へずらせば入れるならずらす（玉突き）。
+// 手動で入れた人・申告外の枠にいる人は動かさない。ずらした人は moved に { participant, from, to } で入れる。
 // 開始時間が動かないよう、今の開始時間に参加できる人だけを繰り上げる
-function fillEmptySlots(r) {
+function fillEmptySlots(r, moved = []) {
   const raid = r.finalRaidType || r.type;
-  const empty = ATTRIBUTES.filter(attr => !r.participants.some(p => p.assignedAttribute === attr));
-  const candidates = r.participants.filter(p => !p.assignedAttribute && fitsStart(r, p));
-  const result = matchSlots(candidates, raid, empty);
-  const promoted = [];
-  candidates.forEach(p => {
-    if (result[p.userId]) {
-      p.assignedAttribute = result[p.userId];
-      promoted.push(p);
+  const isFixed = p => p.manualSlot || !attributesFor(p, raid).includes(p.assignedAttribute);
+  const owner = {};
+  r.participants.forEach(p => { if (p.assignedAttribute) owner[p.assignedAttribute] = p; });
+  const before = new Map(r.participants.map(p => [p, p.assignedAttribute]));
+  // 空き枠を先に（得意な属性から）試し、なければ入っている人をずらす
+  const tryPlace = (p, visited) => {
+    const prefs = preferredFor(p, raid);
+    const attrs = attributesFor(p, raid).sort((a, b) => prefs.includes(b) - prefs.includes(a));
+    const free = attrs.find(attr => !owner[attr] && !visited.has(attr));
+    if (free) {
+      owner[free] = p;
+      return true;
     }
+    for (const attr of attrs) {
+      const occupant = owner[attr];
+      if (visited.has(attr) || isFixed(occupant)) continue;
+      visited.add(attr);
+      delete owner[attr]; // 本人の枠は空けて、その先を探す
+      if (tryPlace(occupant, visited)) {
+        owner[attr] = p;
+        return true;
+      }
+      owner[attr] = occupant;
+    }
+    return false;
+  };
+  const candidates = r.participants.filter(p => !p.assignedAttribute && fitsStart(r, p));
+  candidates.forEach(p => tryPlace(p, new Set()));
+  Object.entries(owner).forEach(([attr, p]) => { p.assignedAttribute = attr; });
+  const promoted = candidates.filter(p => p.assignedAttribute);
+  r.participants.forEach(p => {
+    const from = before.get(p);
+    if (from && from !== p.assignedAttribute) moved.push({ participant: p, from, to: p.assignedAttribute });
   });
   if (!isFinalized(r)) r.finalTime = computeStartTime(r); // 本確定後は開始時間を変えない
   return promoted;
@@ -331,7 +360,11 @@ function setSlot(r, attr, targetUserId) {
     if (occupant !== target) {
       const previous = target.assignedAttribute;
       target.assignedAttribute = attr;
-      if (occupant) occupant.assignedAttribute = previous;
+      target.manualSlot = true;
+      if (occupant) {
+        occupant.assignedAttribute = previous;
+        occupant.manualSlot = Boolean(previous);
+      }
     }
   }
   r.finalTime = computeStartTime(r);

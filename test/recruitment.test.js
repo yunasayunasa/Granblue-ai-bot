@@ -155,6 +155,91 @@ test('開始時間までに抜ける人は補欠', () => {
   assert.strictEqual(rc.reserveReason(r, a), '22:00に抜けるため');
 });
 
+// 仮確定後：全属性の人が火、火闇の人が闇、土風水が埋まり、光が空き
+function shiftScenario() {
+  const all = ['火', '水', '土', '風', '光', '闇'];
+  const r = recruitment([
+    participant('全', all),
+    { ...participant('火闇', ['火', '闇']), preferredByRaid: { 天元: ['火', '闇'] } },
+    participant('土', ['土']), participant('風', ['風']), participant('水', ['水'])
+  ]);
+  rc.autoAssign(r);
+  r.status = 'provisional';
+  r.participants[0].assignedAttribute = '火';
+  r.participants[1].assignedAttribute = '闇';
+  return r;
+}
+const slotsOf = r => r.participants.map(p => `${p.userId}:${p.assignedAttribute}`).join(' ');
+
+test('仮確定後：入っている人をずらせば入れるなら玉突きで入れる', () => {
+  const r = shiftScenario();
+  r.participants.push(participant('闇1', ['闇']));
+  const moved = [];
+  const promoted = rc.fillEmptySlots(r, moved);
+  assert.deepStrictEqual(promoted.map(p => `${p.userId}:${p.assignedAttribute}`), ['闇1:闇']);
+  assert.strictEqual(slotsOf(r), '全:光 火闇:火 土:土 風:風 水:水 闇1:闇');
+  assert.deepStrictEqual(moved.map(m => `${m.participant.userId}:${m.from}→${m.to}`), ['全:火→光', '火闇:闇→火']);
+
+  // もう1人闇しかできない人が来ても、闇は1枠なので補欠
+  r.participants.push(participant('闇2', ['闇']));
+  const moved2 = [];
+  assert.deepStrictEqual(rc.fillEmptySlots(r, moved2), []);
+  assert.deepStrictEqual(moved2, [], '入れないなら誰も動かさない');
+  assert.strictEqual(slotsOf(r), '全:光 火闇:火 土:土 風:風 水:水 闇1:闇 闇2:null');
+
+  // 闇1 が抜けると 闇2 が繰り上がる
+  r.participants.splice(5, 1);
+  assert.deepStrictEqual(rc.fillEmptySlots(r).map(p => `${p.userId}:${p.assignedAttribute}`), ['闇2:闇']);
+});
+
+test('仮確定後の玉突き：空き枠に直接入れるなら誰も動かさない', () => {
+  const r = shiftScenario();
+  r.participants.push(participant('光闇', ['光', '闇']));
+  const moved = [];
+  rc.fillEmptySlots(r, moved);
+  assert.deepStrictEqual(moved, []);
+  assert.strictEqual(r.participants[5].assignedAttribute, '光');
+});
+
+test('仮確定後の玉突き：2段階ずらす', () => {
+  const r = recruitment([participant('A', ['火', '水']), participant('B', ['水', '土'])], { status: 'provisional' });
+  r.participants[0].assignedAttribute = '火';
+  r.participants[1].assignedAttribute = '水';
+  r.participants.push(participant('C', ['火']));
+  const moved = [];
+  rc.fillEmptySlots(r, moved);
+  assert.strictEqual(slotsOf(r), 'A:水 B:土 C:火');
+  assert.strictEqual(moved.length, 2);
+});
+
+test('仮確定後の玉突き：手動で入れた人・申告外の枠にいる人は動かさない', () => {
+  const r = shiftScenario();
+  rc.setSlot(r, '火', '全'); // 手動で火に（すでに火なので変化なし）
+  rc.setSlot(r, '光', '全'); // 手動で光へ → 火が空く
+  rc.setSlot(r, '火', '全'); // 手動で火に戻す
+  assert.ok(r.participants[0].manualSlot);
+  r.participants.push(participant('闇1', ['闇']));
+  assert.deepStrictEqual(rc.fillEmptySlots(r), [], '手動で入れた全属性の人は光へ動かさない');
+  assert.strictEqual(slotsOf(r), '全:火 火闇:闇 土:土 風:風 水:水 闇1:null');
+
+  // 申告外の枠（話し合いで入った）にいる人も動かさない
+  const r2 = shiftScenario();
+  r2.participants[1].assignedAttribute = '光'; // 火闇の人が申告外の光に
+  r2.participants[0].assignedAttribute = '闇';
+  r2.participants.push(participant('火のみ', ['火']));
+  r2.participants.push(participant('闇のみ', ['闇']));
+  rc.fillEmptySlots(r2);
+  assert.strictEqual(slotsOf(r2), '全:闇 火闇:光 土:土 風:風 水:水 火のみ:火 闇のみ:null');
+});
+
+test('募集中に計算し直すと手動の印は消える', () => {
+  const r = shiftScenario();
+  rc.setSlot(r, '光', '全');
+  r.status = 'active';
+  rc.autoAssign(r);
+  assert.ok(r.participants.every(p => !p.manualSlot));
+});
+
 test('確定後の繰り上げは、今の開始時間に参加できる人だけ。本確定後は開始時間を変えない', () => {
   const r = recruitment([participant('A', ['火'], '22:00'), participant('B', ['火'], '23:00'), participant('C', ['火'])]);
   rc.autoAssign(r); // A=火、開始22:00

@@ -327,6 +327,14 @@ async function deleteMessage(channelId, messageId) {
   }
 }
 
+// 補欠を入れるために枠をずらした人をお知らせする（本確定後は本人にメンション）
+async function announceMoves(recruitment, moved, reason) {
+  if (moved.length === 0) return;
+  const lines = moved.map(({ participant, from, to }) => `${who(participant)} さん：${ATTRIBUTE_EMOJI[from]}【${from}】→ ${ATTRIBUTE_EMOJI[to]}【${to}】`);
+  const mentions = isFinalized(recruitment) ? realUserIds(moved.map(m => m.participant)) : [];
+  await postNotice(recruitment, `🔀 ${reason}、枠を入れ替えました\n${lines.join('\n')}`, mentions);
+}
+
 // お知らせを投稿する（userIds の人だけメンション）。調整用スレッドがあればスレッドに、なければ募集カードへの返信として
 async function postNotice(recruitment, content, userIds = []) {
   try {
@@ -1253,24 +1261,28 @@ function remarksFor(state, existing) {
   return existing?.remarks || '';
 }
 
-// 参加者を追加・更新して割り振りを計算し直す
-function applyParticipation(recruitment, data) {
+// 参加者を追加・更新して割り振りを計算し直す（仮確定後に枠をずらした人は moved に入る）
+function applyParticipation(recruitment, data, moved = []) {
   const index = recruitment.participants.findIndex(p => p.userId === data.userId);
   const previous = index >= 0 ? recruitment.participants[index] : null;
   const entry = { ...data, assignedAttribute: previous?.assignedAttribute || null };
+  if (previous?.manualSlot) entry.manualSlot = true;
   if (recruitment.status !== 'active' && entry.assignedAttribute) {
     // 自分で申告から外した属性の枠にいた場合や、時間が今の開始時間に合わなくなった場合は外す
     // （話し合いで申告外の枠に入った場合はそのまま。開始時間は動かさない）
     const raid = recruitment.finalRaidType || recruitment.type;
     const removedFromDeclaration = attributesFor(previous, raid).includes(entry.assignedAttribute) && !attributesFor(entry, raid).includes(entry.assignedAttribute);
-    if (removedFromDeclaration || !fitsStart(recruitment, entry)) entry.assignedAttribute = null;
+    if (removedFromDeclaration || !fitsStart(recruitment, entry)) {
+      entry.assignedAttribute = null;
+      delete entry.manualSlot;
+    }
   }
   if (index >= 0) recruitment.participants[index] = entry;
   else recruitment.participants.push(entry);
 
   // 参加者0人のまま仮確定した「参加者希望」は、最初の参加者が来た時点で実施レイドを決める
   if (recruitment.status === 'active' || (recruitment.type === FLEX_RAID && !recruitment.finalRaidType)) autoAssign(recruitment);
-  else fillEmptySlots(recruitment);
+  else fillEmptySlots(recruitment, moved);
   return recruitment.participants.find(p => p.userId === data.userId);
 }
 
@@ -1576,8 +1588,9 @@ async function commitJoin(interaction, recruitmentId) {
 
   const results = targets.map(recruitment => {
     const existing = recruitment.participants.find(p => p.userId === subjectId);
-    const me = applyParticipation(recruitment, buildParticipantData(recruitment, state, subjectId, username, remarksFor(state, existing)));
-    return { recruitment, me, wasJoined: Boolean(existing) };
+    const moved = [];
+    const me = applyParticipation(recruitment, buildParticipantData(recruitment, state, subjectId, username, remarksFor(state, existing)), moved);
+    return { recruitment, me, wasJoined: Boolean(existing), moved };
   });
   tempUserData.delete(interaction.user.id);
   if (!state.proxyFor) rememberChoice(interaction.user.id, state);
@@ -1597,9 +1610,10 @@ async function commitJoin(interaction, recruitmentId) {
     content = `${wasJoined ? '✅ 参加内容を変更しました！' : '✅ 参加を受け付けました！'}\n${placementText(recruitment, me, false)}`;
   }
   await interaction.editReply({ content: truncate(content, 2000), embeds: [], components: [] });
-  for (const { recruitment } of results) {
+  for (const { recruitment, me, moved } of results) {
     await updateRecruitmentMessage(recruitment);
     await addToThread(recruitment, subjectId);
+    await announceMoves(recruitment, moved, `${who(me)} さんが入るため`);
     if (state.proxyFor) await announceProxy(recruitment, interaction, state.proxyFor, 'register');
   }
 }
@@ -1642,13 +1656,15 @@ async function cancelParticipation(interaction, recruitmentId) {
   await interaction.deferUpdate();
   const [removed] = recruitment.participants.splice(index, 1);
   let promoted = [];
+  const moved = [];
   if (recruitment.status === 'active') autoAssign(recruitment);
-  else if (removed.assignedAttribute) promoted = fillEmptySlots(recruitment);
+  else if (removed.assignedAttribute) promoted = fillEmptySlots(recruitment, moved);
   saveRecruitmentData();
   debugLog('CancelParticipation', `参加キャンセル: ${removed.username} (${recruitmentId}), 残り: ${recruitment.participants.length}`);
 
   await interaction.editReply({ content: '参加をキャンセルしました。', components: [] });
   await updateRecruitmentMessage(recruitment);
+  await announceMoves(recruitment, moved, '補欠の人が入るため');
 
   // 本確定後のキャンセルはお知らせする
   if (isFinalized(recruitment) && removed.assignedAttribute) {
@@ -1852,13 +1868,15 @@ async function executeProxyCancel(interaction, recruitmentId, targetId) {
 
   await interaction.deferUpdate();
   const [removed] = recruitment.participants.splice(index, 1);
-  if (removed.assignedAttribute) fillEmptySlots(recruitment);
+  const moved = [];
+  if (removed.assignedAttribute) fillEmptySlots(recruitment, moved);
   saveRecruitmentData();
   debugLog('ProxyCancel', `${displayNameOf(interaction)} が ${removed.username} をキャンセル (${recruitmentId})`);
 
   await interaction.editReply({ content: `✅ ${removed.username}さんの参加をキャンセルしました。`, embeds: [], components: [] });
   await updateRecruitmentMessage(recruitment);
   await announceProxy(recruitment, interaction, removed, 'cancel');
+  await announceMoves(recruitment, moved, '補欠の人が入るため');
 }
 
 //==========================================================================
